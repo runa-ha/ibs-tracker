@@ -6,5 +6,5 @@
    ========================================================= */
 
 const CONFIG = {
-  GAS_URL: "https://script.google.com/macros/s/XXXXXXXX/exec",
+  GAS_URL: "https://script.google.com/macros/s/AKfycby-KTBMP29IUsOoYY5BUQ2t-yBrbhGlzULU3B04wzJMr_EjhVobORoqdxELqWSCD5Cp/exec",
 };
