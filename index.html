@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>IBSログ</title>
+<meta name="theme-color" content="#0e9488">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="IBSログ">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="app-header">
+  <h1>IBSログ</h1>
+  <div class="header-status">
+    <span id="net-status" class="badge offline hidden">オフライン</span>
+    <span id="queue-badge" class="badge warn hidden">未送信 0件</span>
+  </div>
+</header>
+
+<!-- config.js が未設定のときに表示される案内 -->
+<div id="setup-banner" class="setup-banner hidden">
+  ⚠️ サーバーとまだ接続されていません（config.js のURLが未設定です）
+</div>
+
+<!-- 上部の簡易集計カード -->
+<section class="summary">
+  <div id="card-streak" class="card streak">
+    <div class="card-label">便秘連続日数</div>
+    <div class="card-value"><span id="streak-days">–</span><span class="unit">日</span></div>
+    <div id="streak-note" class="card-note">読み込み中…</div>
+  </div>
+  <div class="mini-cards">
+    <div class="card mini"><div class="card-label">排便回数<small>/7日</small></div><div class="card-value-s" id="stat-stool">–</div></div>
+    <div class="card mini"><div class="card-label">平均ブリストル</div><div class="card-value-s" id="stat-bristol">–</div></div>
+    <div class="card mini"><div class="card-label">腹痛あり日数</div><div class="card-value-s" id="stat-pain">–</div></div>
+    <div class="card mini"><div class="card-label">服薬回数</div><div class="card-value-s" id="stat-med">–</div></div>
+  </div>
+</section>
+
+<main>
+  <!-- ========== 記録タブ（イベント入力） ========== -->
+  <section id="tab-record" class="tab active">
+
+    <h2>排便を記録</h2>
+    <div class="field-row">
+      <label for="stool-time">発生時刻</label>
+      <input type="datetime-local" id="stool-time">
+      <button type="button" class="btn-small" id="stool-time-now">今</button>
+    </div>
+
+    <!-- ブリストルスケールのボタン（1〜7） -->
+    <div id="bristol-buttons" class="bristol-list"></div>
+
+    <!-- ブリストルを選ぶと開く詳細欄 -->
+    <div id="stool-detail" class="detail hidden">
+      <div class="group-label">腹痛</div>
+      <div class="seg" id="pain-seg"></div>
+      <div class="group-label">残便感</div>
+      <div class="seg" id="zanben-seg"></div>
+      <input type="text" id="stool-memo" class="memo-input" placeholder="メモ（任意）">
+      <button id="submit-stool" class="btn-primary">この内容で記録する</button>
+    </div>
+
+    <h2>服薬を記録</h2>
+    <div class="field-row">
+      <label for="med-time">服用時刻</label>
+      <input type="datetime-local" id="med-time">
+      <button type="button" class="btn-small" id="med-time-now">今</button>
+    </div>
+
+    <!-- 薬のボタン（設定シートから動的生成） -->
+    <div id="med-buttons" class="med-grid"><div class="loading-note">薬リストを読み込み中…</div></div>
+
+    <div id="med-detail" class="detail hidden">
+      <input type="text" id="med-memo" class="memo-input" placeholder="メモ（任意）">
+      <button id="submit-med" class="btn-primary">服薬を記録する</button>
+    </div>
+  </section>
+
+  <!-- ========== 今日タブ（デイリー入力） ========== -->
+  <section id="tab-daily" class="tab">
+    <h2>今日のまとめ</h2>
+
+    <div class="field-row">
+      <label for="daily-date">日付</label>
+      <input type="date" id="daily-date">
+    </div>
+
+    <div class="group-label">睡眠時間</div>
+    <div class="stepper">
+      <button type="button" id="sleep-minus">−</button>
+      <span class="stepper-value"><span id="sleep-value">7.0</span> 時間</span>
+      <button type="button" id="sleep-plus">＋</button>
+    </div>
+
+    <div class="group-label">食事タグ（当てはまるものを全部タップ）</div>
+    <div id="tag-chips" class="chip-wrap"><div class="loading-note">タグを読み込み中…</div></div>
+    <input type="text" id="meal-memo" class="memo-input" placeholder="食事メモ（例：昼にラーメン）">
+
+    <div class="group-label">水分量</div>
+    <div class="stepper">
+      <button type="button" id="water-minus">−250</button>
+      <span class="stepper-value"><span id="water-value">0</span> ml</span>
+      <button type="button" id="water-plus">＋250</button>
+    </div>
+
+    <div class="group-label">運動</div>
+    <div class="seg" id="exercise-seg"></div>
+
+    <div class="group-label">気分</div>
+    <div class="seg emoji-seg" id="mood-seg"></div>
+
+    <div class="group-label">ストレス（1=少ない 〜 5=強い）</div>
+    <div class="seg" id="stress-seg"></div>
+
+    <input type="text" id="mental-memo" class="memo-input" placeholder="メンタルメモ（任意。気分やストレスの背景など）">
+    <input type="text" id="daily-memo" class="memo-input" placeholder="メモ（任意）">
+
+    <button id="submit-daily" class="btn-primary">今日の記録を保存する</button>
+  </section>
+</main>
+
+<!-- 下部タブバー -->
+<nav class="tabbar">
+  <button class="tab-btn active" data-tab="tab-record">✏️ 記録</button>
+  <button class="tab-btn" data-tab="tab-daily">🌙 今日</button>
+</nav>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
