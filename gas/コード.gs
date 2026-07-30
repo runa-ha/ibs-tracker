@@ -70,11 +70,12 @@ function initialSetup() {
 
     // 閾値など（K〜L列。次回通院日は将来のリマインダー用）
     sh.getRange(1, 11, 1, 2).setValues([["項目", "値"]]);
-    sh.getRange(2, 11, 4, 2).setValues([
+    sh.getRange(2, 11, 5, 2).setValues([
       ["便秘警戒日数", 3],
       ["下痢判定ブリストル", 6],
       ["下痢判定回数", 3],
       ["次回通院日", ""],
+      ["合言葉", ""],
     ]);
     sh.setFrozenRows(1);
   }
@@ -120,6 +121,21 @@ function doPost(e) {
   lock.waitLock(10000); // 同時送信で行がぶつからないように順番待ち
   try {
     const body = JSON.parse(e.postData.contents);
+
+    // 合言葉チェック（設定シートに合言葉が書かれている場合のみ有効）
+    if (!checkAuth_(body.auth)) {
+      return json_({ ok: false, authError: true, error: "合言葉が一致しません" });
+    }
+
+    if (body.type === "status") {
+      // アプリ起動時の設定マスタ＋簡易集計の取得（旧doGetの役割）
+      const cfg = getSettings_();
+      return json_({
+        ok: true,
+        settings: { medicines: cfg.medicines, tags: cfg.tags, alertDays: cfg.alertDays },
+        summary: computeSummary_(cfg),
+      });
+    }
     if (body.type === "event") {
       appendEvent_(body.data);
     } else if (body.type === "daily") {
@@ -179,23 +195,19 @@ function upsertDaily_(d) {
 }
 
 /* =========================================================
-   doGet : 設定マスタ＋直近7日の簡易集計を返す
+   doGet : データは返さない（合言葉なしで見られるのを防ぐため、
+   設定・集計の取得もすべて doPost の type:"status" に統一）
    ========================================================= */
 function doGet(e) {
-  try {
-    const cfg = getSettings_();
-    return json_({
-      ok: true,
-      settings: {
-        medicines: cfg.medicines,
-        tags: cfg.tags,
-        alertDays: cfg.alertDays,
-      },
-      summary: computeSummary_(cfg),
-    });
-  } catch (err) {
-    return json_({ ok: false, error: String(err) });
-  }
+  return json_({ ok: true, message: "IBSログのAPIは動作中です。データの閲覧・記録はアプリから行ってください。" });
+}
+
+// 合言葉の照合。設定シートに合言葉が未記入の間は誰でも通す
+// （初期セットアップ中でも動くようにするため）
+function checkAuth_(given) {
+  const secret = getSettings_().passphrase;
+  if (!secret) return true;
+  return String(given || "").trim() === secret;
 }
 
 /* =========================================================
@@ -242,6 +254,7 @@ function getSettings_() {
     alertDays: Number(map["便秘警戒日数"]) || 3,
     diarrheaBristol: Number(map["下痢判定ブリストル"]) || 6,
     diarrheaCount: Number(map["下痢判定回数"]) || 3,
+    passphrase: String(map["合言葉"] == null ? "" : map["合言葉"]).trim(), // 外部には返さないこと
   };
 }
 

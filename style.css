@@ -174,6 +174,10 @@ h2 { font-size: 1rem; margin: 18px 0 8px; color: var(--accent-dark); }
 
 .loading-note { color: var(--text-sub); font-size: 0.85rem; padding: 8px 0; }
 
+/* 合言葉パネル */
+.auth-panel { margin: 12px; border: 2px solid var(--warn); }
+.auth-panel .memo-input { margin-top: 8px; }
+
 /* ---------- 下部タブバー ---------- */
 .tabbar {
   position: fixed; bottom: 0; left: 0; right: 0; display: flex;

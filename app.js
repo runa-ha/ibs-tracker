@@ -10,6 +10,7 @@
 // ---------- 定数 ----------
 const LS_QUEUE = "ibs_queue";       // 未送信データの保存キー
 const LS_SETTINGS = "ibs_settings"; // 設定マスタのキャッシュキー
+const LS_AUTH = "ibs_auth";         // 合言葉の保存キー（この端末の中にだけ保存される）
 
 const BRISTOL = [
   { n: 1, name: "コロコロ便", desc: "硬くて木の実のような便" },
@@ -68,6 +69,18 @@ function gasConfigured() {
   return typeof CONFIG !== "undefined" && CONFIG.GAS_URL && !CONFIG.GAS_URL.includes("XXXXXXXX");
 }
 
+// ---------- 合言葉 ----------
+function getAuth() {
+  return localStorage.getItem(LS_AUTH) || "";
+}
+function showAuthPanel(msg) {
+  if (msg) $("auth-msg").textContent = msg;
+  $("auth-panel").classList.remove("hidden");
+}
+function hideAuthPanel() {
+  $("auth-panel").classList.add("hidden");
+}
+
 // ---------- 送信キュー ----------
 function loadQueue() {
   try { return JSON.parse(localStorage.getItem(LS_QUEUE)) || []; } catch (e) { return []; }
@@ -105,7 +118,8 @@ async function flushQueue() {
   try {
     let q = loadQueue();
     while (q.length > 0) {
-      const item = q[0];
+      // 送信の瞬間に合言葉を添える（合言葉入力前に記録した分も後から送れるように）
+      const item = Object.assign({}, q[0], { auth: getAuth() });
       let json;
       try {
         // Content-Typeを指定しない文字列POST = プリフライトなしで送れる
@@ -117,6 +131,10 @@ async function flushQueue() {
       if (json && json.ok) {
         q.shift(); // 成功 → キューから削除
         saveQueue(q);
+      } else if (json && json.authError) {
+        // 合言葉が未入力/不一致 → 記録はキューに残したまま入力を促す
+        showAuthPanel("⚠️ 合言葉が一致しません。入力し直してください（記録は消えていません）");
+        break;
       } else {
         // サーバーがエラーを返した（データ不備など）→ 再送しても直らないので捨てる
         console.error("サーバーエラー:", json && json.error);
@@ -138,9 +156,21 @@ async function fetchStatus() {
     return;
   }
   try {
-    const res = await fetch(CONFIG.GAS_URL);
+    // 集計・設定の取得も合言葉つきのPOSTで行う（合言葉なしでは何も見られない）
+    const res = await fetch(CONFIG.GAS_URL, {
+      method: "POST",
+      body: JSON.stringify({ type: "status", auth: getAuth() }),
+    });
     const json = await res.json();
+    if (json.authError) {
+      showAuthPanel(getAuth()
+        ? "⚠️ 合言葉が一致しません。入力し直してください"
+        : "スプレッドシートの「設定」シートに書いた合言葉を入力してください。この端末に保存され、次回からは入力不要です。");
+      $("streak-note").textContent = "合言葉の入力待ちです";
+      return;
+    }
     if (!json.ok) throw new Error(json.error);
+    hideAuthPanel();
     settings = json.settings;
     localStorage.setItem(LS_SETTINGS, JSON.stringify(settings));
     renderMasters();
@@ -356,6 +386,18 @@ function init() {
   buildSeg("mood-seg", [1, 2, 3, 4, 5], (v) => (selectedMood = v), MOOD_EMOJI);
   buildSeg("stress-seg", [1, 2, 3, 4, 5], (v) => (selectedStress = v));
   $("submit-daily").onclick = submitDaily;
+
+  // 合言葉の保存ボタン
+  $("auth-save").onclick = () => {
+    const v = $("auth-input").value.trim();
+    if (!v) { toast("合言葉を入力してください"); return; }
+    localStorage.setItem(LS_AUTH, v);
+    $("auth-input").value = "";
+    hideAuthPanel();
+    toast("接続を確認しています…");
+    fetchStatus();
+    flushQueue();
+  };
 
   // 前回取得した設定マスタがあれば先に表示（オフライン起動対策）
   try {
