@@ -174,9 +174,20 @@ h2 { font-size: 1rem; margin: 18px 0 8px; color: var(--accent-dark); }
 
 .loading-note { color: var(--text-sub); font-size: 0.85rem; padding: 8px 0; }
 
-/* 合言葉パネル */
-.auth-panel { margin: 12px; border: 2px solid var(--warn); }
-.auth-panel .memo-input { margin-top: 8px; }
+/* 合言葉ポップアップ（画面全体を覆い、中央にカードを表示） */
+.auth-overlay {
+  position: fixed; inset: 0; z-index: 200;
+  background: rgba(17, 24, 39, 0.6);
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+}
+.auth-card {
+  background: #fff; border-radius: var(--radius);
+  padding: 20px; width: 100%; max-width: 360px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+.auth-title { font-weight: 700; font-size: 1.05rem; color: var(--accent-dark); }
+.auth-card .memo-input { margin-top: 10px; }
 
 /* ---------- 下部タブバー ---------- */
 .tabbar {
