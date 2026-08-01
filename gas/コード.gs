@@ -101,7 +101,6 @@ function onOpen() {
     .createMenu("IBS分析")
     .addItem("ダッシュボードを今すぐ更新", "buildDashboard")
     .addItem("日次トリガーを設定（毎朝5時に自動更新）", "setupDailyTrigger")
-    .addItem("夕食前リマインダーを設定（毎日17時ごろメール）", "setupEveningReminder")
     .addSeparator()
     .addItem("処方アップデート(2026-07-31)を適用", "applyRxUpdate20260731")
     .addItem("初期セットアップ（最初に1回）", "initialSetup")
@@ -131,10 +130,10 @@ function applyRxUpdate20260731() {
       ["グーフィス", "現行", "便秘治療薬（毎日の排便維持）", "1日1回 夕食前 2錠(5mg×2)", "夕食前", "2錠", start, 28, "", "", "必ず食「前」に。食後だと効果が弱まる", 2],
       ["ヘモクロン", "現行", "痔治療薬（内服）", "1日3回 朝昼夕食後 各1カプセル(200mg)", "朝食後,昼食後,夕食後", "1カプセル", start, 14, "", "", "他の薬より早く（14日で）終わる", 3],
       ["ボラザG軟膏", "現行", "痔治療薬（外用）", "1日1〜2回 塗布(2.4g)", "外用", "適量", start, "", "20本", "", "", 4],
-      ["イリボー", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 11],
-      ["ミヤBM", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 12],
-      ["ブスコパン", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 13],
-      ["マグミット（酸化マグネシウム）", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 14],
+      ["ミヤBM", "現行", "整腸剤（酪酸菌）", "1日1回 朝食後 2錠", "朝食後", "2錠", "", "", "", "", "続けて飲む薬（終了日なし）", 5],
+      ["イリボー", "頓服", "", "", "", "", "", "", "", "", "頓服（必要なときに使用）", 11],
+      ["ブスコパン", "頓服", "", "", "", "", "", "", "", "", "頓服（必要なときに使用）", 12],
+      ["マグミット（酸化マグネシウム）", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 13],
     ];
     rx.getRange(2, 1, rows.length, RX_HEADERS.length).setValues(rows);
     // 終了日は「開始日＋日数−1」の数式で自動計算（開始日を変えれば追従する）
@@ -157,7 +156,11 @@ function applyRxUpdate20260731() {
     done.push("設定シートに観察タグマスタを追加");
   }
 
-  // 4) 薬マスタ: 新処方4剤を追加し、旧IBS/便秘薬を無効化（行は残る＝履歴）
+  // 4) 薬マスタの整理
+  //    - 新処方4剤を追加（有効）
+  //    - イリボー・ブスコパンは頓服として有効のまま（「その他の服薬」ボタンに表示）
+  //    - ミヤBMは服薬チェック側で管理するため頓服ボタンからは外す（無効）
+  //    - マグミットは旧処方として無効化（行は残る＝履歴）
   //    ※アトモキセチン・チラーヂンは別疾患の継続薬の可能性があるため有効のまま
   const medColIdx = stHead.indexOf("薬名");
   if (medColIdx >= 0) {
@@ -178,16 +181,55 @@ function applyRxUpdate20260731() {
       st.getRange(lastRow + 1, medColIdx + 1, rows.length, 3).setValues(rows);
       done.push("薬マスタに追加: " + toAdd.join("、"));
     }
-    const disable = ["イリボー", "ミヤBM", "ブスコパン", "マグミット"];
-    const disabled = [];
+    const desired = { "イリボー": "有効", "ブスコパン": "有効", "ミヤBM": "無効", "マグミット": "無効" };
+    const changed = [];
     for (let r = 1; r < values.length; r++) {
       const n = String(values[r][medColIdx] || "").trim();
-      if (disable.indexOf(n) >= 0 && String(values[r][medColIdx + 2]) !== "無効") {
-        st.getRange(r + 1, medColIdx + 3).setValue("無効");
-        disabled.push(n);
+      if (n in desired && String(values[r][medColIdx + 2]) !== desired[n]) {
+        st.getRange(r + 1, medColIdx + 3).setValue(desired[n]);
+        changed.push(n + "→" + desired[n]);
       }
     }
-    if (disabled.length) done.push("旧処方を無効化（履歴として残存）: " + disabled.join("、"));
+    if (changed.length) done.push("薬マスタの有効/無効を更新: " + changed.join("、"));
+  }
+
+  // 5) 処方シートの調整（すでに作成済みの場合にも適用される）
+  //    ミヤBMを「現行」（朝食後2錠）に、イリボー/ブスコパンを「頓服」に
+  const rxSh = ss.getSheetByName(SHEET_RX);
+  if (rxSh) {
+    const rxVals = rxSh.getDataRange().getValues();
+    const rxHead = rxVals[0];
+    const col = {};
+    RX_HEADERS.forEach(function (h) { col[h] = rxHead.indexOf(h); });
+    const setCell = function (r, h, v) { if (col[h] >= 0) rxSh.getRange(r + 1, col[h] + 1).setValue(v); };
+
+    let miyaRow = -1;
+    for (let r = 1; r < rxVals.length; r++) {
+      const n = String(rxVals[r][col["薬名"]] || "").trim();
+      if (n === "ミヤBM" && miyaRow < 0) miyaRow = r;
+      if ((n === "イリボー" || n === "ブスコパン") && String(rxVals[r][col["状態"]]) === "過去") {
+        setCell(r, "状態", "頓服");
+        setCell(r, "服用メモ", "頓服（必要なときに使用）");
+        done.push(n + "を「頓服」に変更");
+      }
+    }
+    if (miyaRow >= 0) {
+      if (String(rxVals[miyaRow][col["状態"]]) !== "現行") {
+        setCell(miyaRow, "状態", "現行");
+        setCell(miyaRow, "分類", "整腸剤（酪酸菌）");
+        setCell(miyaRow, "用法", "1日1回 朝食後 2錠");
+        setCell(miyaRow, "タイミング", "朝食後");
+        setCell(miyaRow, "1回量", "2錠");
+        setCell(miyaRow, "服用メモ", "続けて飲む薬（終了日なし）");
+        setCell(miyaRow, "表示順", 5);
+        done.push("ミヤBMを服薬チェック（朝食後2錠）に追加");
+      }
+    } else {
+      const map = { "薬名": "ミヤBM", "状態": "現行", "分類": "整腸剤（酪酸菌）", "用法": "1日1回 朝食後 2錠",
+                    "タイミング": "朝食後", "1回量": "2錠", "服用メモ": "続けて飲む薬（終了日なし）", "表示順": 5 };
+      rxSh.appendRow(rxHead.map(function (h) { return h in map ? map[h] : ""; }));
+      done.push("ミヤBMを服薬チェック（朝食後2錠）に追加");
+    }
   }
 
   SpreadsheetApp.getUi().alert(
@@ -512,39 +554,13 @@ function todayMeds_() {
 }
 
 /* =========================================================
-   夕食前リマインダー
-   毎日17時ごろ、夕食前の薬（グーフィス）が未記録ならメールを送る
-   処方期間が終わったら自動で送らなくなる
+   夕食前リマインダーは不要とのことで廃止。
+   万一トリガーが設定済みだった場合も、実行時に自動で解除される
    ========================================================= */
-function setupEveningReminder() {
+function eveningReminder() {
   ScriptApp.getProjectTriggers().forEach(function (t) {
     if (t.getHandlerFunction() === "eveningReminder") ScriptApp.deleteTrigger(t);
   });
-  ScriptApp.newTrigger("eveningReminder").timeBased().everyDays(1).atHour(17).create();
-  SpreadsheetApp.getUi().alert("設定しました。毎日17時ごろ、夕食前の薬が未記録ならメールでお知らせします。\n（処方期間が終われば自動的に送信されなくなります）");
-}
-
-function eveningReminder() {
-  const today = startOfDay_(new Date());
-  // 夕食前に飲む現行の薬のうち、処方期間内のもの
-  const targets = currentRx_().filter(function (r) {
-    if (r.timings.indexOf("夕食前") < 0) return false;
-    if (r.endDate && fmtDate_(today) > r.endDate) return false; // 飲み切った後は通知しない
-    return true;
-  });
-  if (!targets.length) return;
-  const taken = todayMeds_().filter(function (m) { return m.timing === "夕食前"; }).map(function (m) { return m.med; });
-  const pending = targets.filter(function (r) { return taken.indexOf(r.name) < 0; });
-  if (!pending.length) return;
-  const names = pending.map(function (r) { return r.name; }).join("、");
-  MailApp.sendEmail(
-    Session.getEffectiveUser().getEmail(),
-    "【IBSログ】夕食前のお薬リマインダー（" + names + "）",
-    "夕食前に飲む薬（" + names + "）が今日はまだ記録されていません。\n\n" +
-    "※ グーフィスは必ず食事の「前」に服用してください（食後だと効果が弱まります）。\n\n" +
-    "飲んだら記録: https://runa-ha.github.io/ibs-tracker/\n" +
-    "（すでに飲んでいて記録し忘れていただけなら、アプリでチェックすれば明日からも正しく集計されます）"
-  );
 }
 
 /* =========================================================
