@@ -76,7 +76,11 @@
       <button id="submit-stool" class="btn-primary">この内容で記録する</button>
     </div>
 
-    <h2>服薬を記録</h2>
+    <h2>今日の服薬チェック</h2>
+    <!-- 「処方」シートの現行処方から動的生成。タップで記録、もう一度タップで取り消し -->
+    <div id="med-checklist" class="checklist"><div class="loading-note">処方を読み込み中…</div></div>
+
+    <h2>その他の服薬（頓服など）</h2>
     <div class="field-row">
       <label for="med-time">服用時刻</label>
       <input type="datetime-local" id="med-time">
@@ -118,6 +122,9 @@
       <span class="stepper-value"><span id="water-value">0</span> ml</span>
       <button type="button" id="water-plus">＋250</button>
     </div>
+
+    <div class="group-label">体調の観察（薬の副作用チェックなど。当てはまるものをタップ）</div>
+    <div id="obs-chips" class="chip-wrap"><div class="loading-note">読み込み中…</div></div>
 
     <div class="group-label">運動</div>
     <div class="seg" id="exercise-seg"></div>

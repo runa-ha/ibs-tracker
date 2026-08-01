@@ -28,8 +28,13 @@ const ZANBEN_OPTIONS = ["なし", "あり"];
 const EXERCISE_OPTIONS = ["なし", "軽い", "しっかり"];
 const MOOD_EMOJI = ["😞", "😕", "😐", "🙂", "😄"];
 
+// 服薬チェックのタイミング表示順（GAS側のTIMING_ORDERと合わせる）
+const TIMING_ORDER = ["朝食後", "昼食後", "夕食前", "夕食後", "外用"];
+
 // ---------- 状態 ----------
-let settings = { medicines: [], tags: [], alertDays: 3 }; // GASから取得（取得前はデフォルト）
+let settings = { medicines: [], tags: [], obsTags: [], alertDays: 3 }; // GASから取得（取得前はデフォルト）
+let prescriptions = []; // 現行処方（「処方」シート由来）
+let todayMeds = [];     // 今日すでに記録した服薬 [{med, timing}]
 let selectedBristol = null;
 let selectedPain = "なし";
 let selectedZanben = "なし";
@@ -40,6 +45,7 @@ let selectedExercise = null;
 let selectedMood = null;
 let selectedStress = null;
 let selectedTags = new Set();
+let selectedObsTags = new Set();
 let flushing = false;
 
 // ---------- 小道具 ----------
@@ -172,8 +178,12 @@ async function fetchStatus() {
     if (!json.ok) throw new Error(json.error);
     hideAuthPanel();
     settings = json.settings;
-    localStorage.setItem(LS_SETTINGS, JSON.stringify(settings));
+    prescriptions = json.prescriptions || [];
+    todayMeds = json.todayMeds || [];
+    // 処方もキャッシュしておく（オフライン起動時もチェックリストを出すため）
+    localStorage.setItem(LS_SETTINGS, JSON.stringify({ settings: settings, prescriptions: prescriptions }));
     renderMasters();
+    renderChecklist();
     renderSummary(json.summary);
   } catch (e) {
     console.warn("集計の取得に失敗（オフライン？）:", e);
@@ -220,22 +230,110 @@ function renderMasters() {
   });
 
   // 食事タグ
-  const tagWrap = $("tag-chips");
-  tagWrap.innerHTML = "";
-  if (settings.tags.length === 0) {
-    tagWrap.innerHTML = '<div class="loading-note">タグが未取得です</div>';
+  buildChips_("tag-chips", settings.tags, selectedTags, "タグが未取得です");
+  // 観察タグ（副作用チェック用）
+  buildChips_("obs-chips", settings.obsTags || [], selectedObsTags, "処方アップデート後に表示されます");
+}
+
+// タグ選択チップを作る共通処理
+function buildChips_(containerId, names, selectedSet, emptyMsg) {
+  const wrap = $(containerId);
+  wrap.innerHTML = "";
+  if (!names.length) {
+    wrap.innerHTML = '<div class="loading-note">' + emptyMsg + "</div>";
+    return;
   }
-  settings.tags.forEach((name) => {
+  names.forEach((name) => {
     const c = document.createElement("button");
     c.className = "chip";
     c.textContent = name;
-    if (selectedTags.has(name)) c.classList.add("selected");
+    if (selectedSet.has(name)) c.classList.add("selected");
     c.onclick = () => {
-      if (selectedTags.has(name)) selectedTags.delete(name);
-      else selectedTags.add(name);
+      if (selectedSet.has(name)) selectedSet.delete(name);
+      else selectedSet.add(name);
       c.classList.toggle("selected");
     };
-    tagWrap.appendChild(c);
+    wrap.appendChild(c);
+  });
+}
+
+/* =========================================================
+   今日の服薬チェック（「処方」シートの現行処方から生成）
+   タップで記録、チェック済みをタップで取り消し
+   ========================================================= */
+function isMedChecked(med, timing) {
+  return todayMeds.some((m) => m.med === med && m.timing === timing);
+}
+
+function renderChecklist() {
+  const wrap = $("med-checklist");
+  wrap.innerHTML = "";
+  if (!prescriptions.length) {
+    wrap.innerHTML = '<div class="loading-note">現行処方が未設定です（スプレッドシートの「処方」シートに登録すると表示されます）</div>';
+    return;
+  }
+  const hour = new Date().getHours();
+  TIMING_ORDER.forEach((slot) => {
+    const meds = prescriptions.filter((p) => (p.timings || []).indexOf(slot) >= 0);
+    if (!meds.length) return;
+
+    const slotDiv = document.createElement("div");
+    slotDiv.className = "slot";
+    // 夕食前の薬（グーフィス）は夕方以降・未チェックのとき強調表示
+    const urgent = slot === "夕食前" && hour >= 16 && meds.some((p) => !isMedChecked(p.name, slot));
+    const label = document.createElement("div");
+    label.className = "slot-label" + (urgent ? " urgent" : "");
+    label.textContent = slot + (urgent ? " ⚠ そろそろ時間です（食事の前に！）" : "");
+    slotDiv.appendChild(label);
+
+    meds.forEach((p) => {
+      const checked = isMedChecked(p.name, slot);
+      const b = document.createElement("button");
+      b.className = "check-btn" + (checked ? " checked" : "");
+      // 残り日数（日数指定の薬）or 数量（外用など）を小さく表示
+      let sub = p.dose || "";
+      if (p.remainingDays != null) sub += "　あと" + p.remainingDays + "日（" + (p.endDate || "") + "まで）";
+      else if (p.qty) sub += "　" + p.qty;
+      if (p.remainingDays != null && p.remainingDays <= 5) b.classList.add("low");
+      b.innerHTML =
+        '<span class="check-mark">' + (checked ? "✓" : "") + "</span>" +
+        '<span class="check-body"><b>' + p.name + "</b><small>" + sub + "</small>" +
+        (p.note ? '<small class="med-note">' + p.note + "</small>" : "") +
+        "</span>";
+      b.onclick = () => toggleMedCheck(p, slot);
+      slotDiv.appendChild(b);
+    });
+    wrap.appendChild(slotDiv);
+  });
+}
+
+function toggleMedCheck(p, slot) {
+  if (isMedChecked(p.name, slot)) {
+    // チェック済み → 取り消し（今日の該当行をシートから削除。オンライン時のみ）
+    if (!confirm("「" + p.name + "（" + slot + "）」の今日の記録を取り消しますか？")) return;
+    fetch(CONFIG.GAS_URL, {
+      method: "POST",
+      body: JSON.stringify({ type: "deleteMedToday", auth: getAuth(), data: { med: p.name, timing: slot } }),
+    })
+      .then((r) => r.json())
+      .then((j) => {
+        if (j.ok) {
+          todayMeds = todayMeds.filter((m) => !(m.med === p.name && m.timing === slot));
+          renderChecklist();
+          toast("取り消しました");
+        } else {
+          toast("⚠️ 取り消せませんでした: " + (j.error || "不明"));
+        }
+      })
+      .catch(() => toast("📡 オフラインのため取り消せません"));
+    return;
+  }
+  // 未チェック → 服薬として記録（オフラインでもキューに入る）
+  todayMeds.push({ med: p.name, timing: slot });
+  renderChecklist();
+  submitPayload({
+    type: "event",
+    data: { kind: "服薬", med: p.name, timing: slot, occurredAt: new Date().toISOString() },
   });
 }
 
@@ -337,6 +435,7 @@ function submitDaily() {
       stress: selectedStress || "",
       mentalMemo: $("mental-memo").value.trim(),
       memo: $("daily-memo").value.trim(),
+      obsTags: Array.from(selectedObsTags),
     },
   });
 }
@@ -399,12 +498,18 @@ function init() {
     flushQueue();
   };
 
-  // 前回取得した設定マスタがあれば先に表示（オフライン起動対策）
+  // 前回取得した設定マスタ・処方があれば先に表示（オフライン起動対策）
   try {
     const cached = JSON.parse(localStorage.getItem(LS_SETTINGS));
-    if (cached) settings = cached;
+    if (cached && cached.settings) {
+      settings = cached.settings;
+      prescriptions = cached.prescriptions || [];
+    } else if (cached) {
+      settings = cached; // 旧形式のキャッシュ
+    }
   } catch (e) { /* 無視 */ }
   renderMasters();
+  renderChecklist();
 
   // オンライン/オフライン表示と自動再送
   const updateNet = () => {

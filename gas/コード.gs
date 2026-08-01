@@ -24,9 +24,15 @@ const SHEET_CALENDAR = "カレンダービュー";
 const SHEET_CYCLE = "サイクルビュー";
 const SHEET_MENTAL = "メンタル×体調";
 const SHEET_RHYTHM = "排便リズム";
+const SHEET_RX = "処方";           // 処方の管理（現行/過去）
+const SHEET_RXLOG = "処方経過";     // 受診報告用の日別ビュー
 
-const EVENT_HEADERS = ["記録日時", "種別", "発生時刻", "ブリストルスケール", "腹痛", "残便感", "薬名", "メモ"];
-const DAILY_HEADERS = ["日付", "睡眠時間", "食事タグ", "食事メモ", "水分量", "運動", "気分", "ストレス", "メンタルメモ", "メモ"];
+const EVENT_HEADERS = ["記録日時", "種別", "発生時刻", "ブリストルスケール", "腹痛", "残便感", "薬名", "タイミング", "メモ"];
+const DAILY_HEADERS = ["日付", "睡眠時間", "食事タグ", "食事メモ", "水分量", "運動", "気分", "ストレス", "メンタルメモ", "メモ", "観察タグ"];
+const RX_HEADERS = ["薬名", "状態", "分類", "用法", "タイミング", "1回量", "開始日", "日数", "数量", "終了日", "服用メモ", "表示順"];
+
+// 服薬チェックのタイミング表示順
+const TIMING_ORDER = ["朝食後", "昼食後", "夕食前", "夕食後", "外用"];
 
 const WEEKDAYS_JP = ["日", "月", "火", "水", "木", "金", "土"];
 
@@ -95,9 +101,110 @@ function onOpen() {
     .createMenu("IBS分析")
     .addItem("ダッシュボードを今すぐ更新", "buildDashboard")
     .addItem("日次トリガーを設定（毎朝5時に自動更新）", "setupDailyTrigger")
+    .addItem("夕食前リマインダーを設定（毎日17時ごろメール）", "setupEveningReminder")
     .addSeparator()
+    .addItem("処方アップデート(2026-07-31)を適用", "applyRxUpdate20260731")
     .addItem("初期セットアップ（最初に1回）", "initialSetup")
     .addToUi();
+}
+
+/* =========================================================
+   処方アップデート(2026-07-31)の適用
+   何度実行しても安全（すでに適用済みの部分はスキップされる）
+   ========================================================= */
+function applyRxUpdate20260731() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const done = [];
+
+  // 1) 既存シートに新しい列を追加（なければ末尾に足す）
+  if (ensureHeader_(mustSheet_(SHEET_EVENT), "タイミング")) done.push("イベントログに「タイミング」列を追加");
+  if (ensureHeader_(mustSheet_(SHEET_DAILY), "観察タグ")) done.push("デイリーログに「観察タグ」列を追加");
+
+  // 2) 処方シートの作成（現行4剤＋旧処方を履歴として登録）
+  if (!ss.getSheetByName(SHEET_RX)) {
+    const rx = ss.insertSheet(SHEET_RX);
+    rx.getRange(1, 1, 1, RX_HEADERS.length).setValues([RX_HEADERS]).setFontWeight("bold");
+    rx.setFrozenRows(1);
+    const start = new Date(2026, 6, 31); // 2026-07-31
+    const rows = [
+      ["ポリフル", "現行", "IBS治療薬（便の水分調整）", "1日3回 朝昼夕食後 各1錠(500mg)", "朝食後,昼食後,夕食後", "1錠", start, 28, "", "", "コップ1杯以上の十分な水で服用", 1],
+      ["グーフィス", "現行", "便秘治療薬（毎日の排便維持）", "1日1回 夕食前 2錠(5mg×2)", "夕食前", "2錠", start, 28, "", "", "必ず食「前」に。食後だと効果が弱まる", 2],
+      ["ヘモクロン", "現行", "痔治療薬（内服）", "1日3回 朝昼夕食後 各1カプセル(200mg)", "朝食後,昼食後,夕食後", "1カプセル", start, 14, "", "", "他の薬より早く（14日で）終わる", 3],
+      ["ボラザG軟膏", "現行", "痔治療薬（外用）", "1日1〜2回 塗布(2.4g)", "外用", "適量", start, "", "20本", "", "", 4],
+      ["イリボー", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 11],
+      ["ミヤBM", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 12],
+      ["ブスコパン", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 13],
+      ["マグミット（酸化マグネシウム）", "過去", "", "", "", "", "", "", "", "", "2026-07-31の処方変更前まで使用", 14],
+    ];
+    rx.getRange(2, 1, rows.length, RX_HEADERS.length).setValues(rows);
+    // 終了日は「開始日＋日数−1」の数式で自動計算（開始日を変えれば追従する）
+    for (let r = 2; r <= rows.length + 1; r++) {
+      rx.getRange(r, 10).setFormula('=IF(AND(G' + r + '<>"",H' + r + '<>""),G' + r + '+H' + r + '-1,"")');
+    }
+    rx.getRange(2, 7, rows.length, 4).setNumberFormat("yyyy-mm-dd");
+    rx.getRange(2, 10, rows.length, 1).setNumberFormat("yyyy-mm-dd");
+    done.push("「処方」シートを作成（現行4剤＋旧処方4件）");
+  }
+
+  // 3) 設定シート: 観察タグマスタを追加（副作用チェック用）
+  const st = mustSheet_(SHEET_SETTINGS);
+  const stHead = st.getRange(1, 1, 1, st.getLastColumn()).getValues()[0];
+  if (stHead.indexOf("観察タグ名") < 0) {
+    const col = st.getLastColumn() + 2; // 1列空けて右側に追加
+    st.getRange(1, col, 1, 3).setValues([["観察タグ名", "表示順", "有効"]]).setFontWeight("bold");
+    const obs = [["腹痛", 1, "有効"], ["お腹ゴロゴロ", 2, "有効"], ["ガス・お腹の張り", 3, "有効"], ["吐き気", 4, "有効"], ["問題なし", 5, "有効"]];
+    st.getRange(2, col, obs.length, 3).setValues(obs);
+    done.push("設定シートに観察タグマスタを追加");
+  }
+
+  // 4) 薬マスタ: 新処方4剤を追加し、旧IBS/便秘薬を無効化（行は残る＝履歴）
+  //    ※アトモキセチン・チラーヂンは別疾患の継続薬の可能性があるため有効のまま
+  const medColIdx = stHead.indexOf("薬名");
+  if (medColIdx >= 0) {
+    const values = st.getDataRange().getValues();
+    const names = [];
+    let maxOrder = 0, lastRow = 1;
+    for (let r = 1; r < values.length; r++) {
+      const n = String(values[r][medColIdx] || "").trim();
+      if (!n) continue;
+      names.push(n);
+      lastRow = r + 1;
+      maxOrder = Math.max(maxOrder, Number(values[r][medColIdx + 1]) || 0);
+    }
+    const newMeds = ["ポリフル", "グーフィス", "ヘモクロン", "ボラザG軟膏"];
+    const toAdd = newMeds.filter(function (n) { return names.indexOf(n) < 0; });
+    if (toAdd.length) {
+      const rows = toAdd.map(function (n, i) { return [n, maxOrder + i + 1, "有効"]; });
+      st.getRange(lastRow + 1, medColIdx + 1, rows.length, 3).setValues(rows);
+      done.push("薬マスタに追加: " + toAdd.join("、"));
+    }
+    const disable = ["イリボー", "ミヤBM", "ブスコパン", "マグミット"];
+    const disabled = [];
+    for (let r = 1; r < values.length; r++) {
+      const n = String(values[r][medColIdx] || "").trim();
+      if (disable.indexOf(n) >= 0 && String(values[r][medColIdx + 2]) !== "無効") {
+        st.getRange(r + 1, medColIdx + 3).setValue("無効");
+        disabled.push(n);
+      }
+    }
+    if (disabled.length) done.push("旧処方を無効化（履歴として残存）: " + disabled.join("、"));
+  }
+
+  SpreadsheetApp.getUi().alert(
+    done.length
+      ? "処方アップデートを適用しました。\n\n・" + done.join("\n・") +
+        "\n\n※やめていない薬が無効化されていたら、設定シートで「有効」に戻してください。"
+      : "すでに適用済みです（変更はありません）。"
+  );
+}
+
+// シートの1行目に指定の見出しがなければ末尾に追加する。追加したらtrue
+function ensureHeader_(sh, name) {
+  const lastCol = Math.max(sh.getLastColumn(), 1);
+  const head = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+  if (head.indexOf(name) >= 0) return false;
+  sh.getRange(1, lastCol + 1).setValue(name).setFontWeight("bold");
+  return true;
 }
 
 /* =========================================================
@@ -132,14 +239,20 @@ function doPost(e) {
       const cfg = getSettings_();
       return json_({
         ok: true,
-        settings: { medicines: cfg.medicines, tags: cfg.tags, alertDays: cfg.alertDays },
+        settings: { medicines: cfg.medicines, tags: cfg.tags, obsTags: cfg.obsTags, alertDays: cfg.alertDays },
         summary: computeSummary_(cfg),
+        prescriptions: currentRx_(),
+        todayMeds: todayMeds_(),
       });
     }
     if (body.type === "event") {
       appendEvent_(body.data);
     } else if (body.type === "daily") {
       upsertDaily_(body.data);
+    } else if (body.type === "deleteMedToday") {
+      // 服薬チェックの取り消し（今日の該当行を1件削除）
+      const removed = deleteMedToday_(body.data || {});
+      return json_({ ok: true, removed: removed });
     } else {
       throw new Error("不明なデータ種別: " + body.type);
     }
@@ -152,35 +265,42 @@ function doPost(e) {
 }
 
 // イベント（排便・服薬）を1行追記
+// ※列の並びが変わっても壊れないよう、見出し名に合わせて書き込む
 function appendEvent_(d) {
   const sh = mustSheet_(SHEET_EVENT);
-  sh.appendRow([
-    new Date(),                       // 記録日時（サーバー側で自動付与）
-    d.kind || "",
-    d.occurredAt ? new Date(d.occurredAt) : new Date(),
-    d.bristol || "",
-    d.pain || "",
-    d.zanben || "",
-    d.med || "",
-    d.memo || "",
-  ]);
+  const map = {
+    "記録日時": new Date(), // サーバー側で自動付与
+    "種別": d.kind || "",
+    "発生時刻": d.occurredAt ? new Date(d.occurredAt) : new Date(),
+    "ブリストルスケール": d.bristol || "",
+    "腹痛": d.pain || "",
+    "残便感": d.zanben || "",
+    "薬名": d.med || "",
+    "タイミング": d.timing || "",
+    "メモ": d.memo || "",
+  };
+  const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  sh.appendRow(head.map(function (h) { return h in map ? map[h] : ""; }));
 }
 
 // デイリーログを追記（同じ日付が既にあれば上書き）
 function upsertDaily_(d) {
   const sh = mustSheet_(SHEET_DAILY);
-  const row = [
-    d.date || fmtDate_(new Date()),
-    d.sleep === "" || d.sleep == null ? "" : Number(d.sleep),
-    (d.tags || []).join(","),
-    d.mealMemo || "",
-    d.water === "" || d.water == null ? "" : Number(d.water),
-    d.exercise || "",
-    d.mood || "",
-    d.stress || "",
-    d.mentalMemo || "",
-    d.memo || "",
-  ];
+  const map = {
+    "日付": d.date || fmtDate_(new Date()),
+    "睡眠時間": d.sleep === "" || d.sleep == null ? "" : Number(d.sleep),
+    "食事タグ": (d.tags || []).join(","),
+    "食事メモ": d.mealMemo || "",
+    "水分量": d.water === "" || d.water == null ? "" : Number(d.water),
+    "運動": d.exercise || "",
+    "気分": d.mood || "",
+    "ストレス": d.stress || "",
+    "メンタルメモ": d.mentalMemo || "",
+    "メモ": d.memo || "",
+    "観察タグ": (d.obsTags || []).join(","),
+  };
+  const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const row = head.map(function (h) { return h in map ? map[h] : ""; });
   const last = sh.getLastRow();
   if (last >= 2) {
     const dates = sh.getRange(2, 1, last - 1, 1).getValues();
@@ -192,6 +312,26 @@ function upsertDaily_(d) {
     }
   }
   sh.appendRow(row);
+}
+
+// 今日の服薬チェックを1件取り消す（薬名とタイミングが一致する今日の行を削除）
+function deleteMedToday_(d) {
+  const sh = mustSheet_(SHEET_EVENT);
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return false;
+  const head = values[0];
+  const iKind = head.indexOf("種別"), iAt = head.indexOf("発生時刻"),
+        iMed = head.indexOf("薬名"), iTim = head.indexOf("タイミング");
+  const today = fmtDate_(new Date());
+  for (let r = values.length - 1; r >= 1; r--) { // 新しい行から探す
+    if (String(values[r][iKind]) !== "服薬") continue;
+    if (String(values[r][iMed]) !== String(d.med)) continue;
+    if (iTim >= 0 && String(values[r][iTim] || "") !== String(d.timing || "")) continue;
+    if (!(values[r][iAt] instanceof Date) || fmtDate_(values[r][iAt]) !== today) continue;
+    sh.deleteRow(r + 1);
+    return true;
+  }
+  return false;
 }
 
 /* =========================================================
@@ -251,6 +391,7 @@ function getSettings_() {
   return {
     medicines: readMaster(medCol),
     tags: readMaster(tagCol),
+    obsTags: readMaster(head.indexOf("観察タグ名")),
     alertDays: Number(map["便秘警戒日数"]) || 3,
     diarrheaBristol: Number(map["下痢判定ブリストル"]) || 6,
     diarrheaCount: Number(map["下痢判定回数"]) || 3,
@@ -310,6 +451,103 @@ function computeSummary_(cfg) {
 }
 
 /* =========================================================
+   処方シートの読み込みと服薬チェック関連
+   ========================================================= */
+function readRx_() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_RX);
+  if (!sh) return [];
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
+  const head = values[0];
+  const idx = {};
+  RX_HEADERS.forEach(function (h) { idx[h] = head.indexOf(h); });
+  const get = function (row, h) { return idx[h] >= 0 ? row[idx[h]] : ""; };
+  const out = [];
+  for (let r = 1; r < values.length; r++) {
+    const name = String(get(values[r], "薬名") || "").trim();
+    if (!name) continue;
+    out.push({
+      name: name,
+      status: String(get(values[r], "状態") || "").trim(),
+      category: String(get(values[r], "分類") || ""),
+      usage: String(get(values[r], "用法") || ""),
+      timings: String(get(values[r], "タイミング") || "").split(",").map(function (s) { return s.trim(); }).filter(String),
+      dose: String(get(values[r], "1回量") || ""),
+      start: get(values[r], "開始日") instanceof Date ? get(values[r], "開始日") : null,
+      days: Number(get(values[r], "日数")) || null,
+      qty: String(get(values[r], "数量") || ""),
+      note: String(get(values[r], "服用メモ") || ""),
+      order: Number(get(values[r], "表示順")) || 999,
+    });
+  }
+  out.sort(function (a, b) { return a.order - b.order; });
+  return out;
+}
+
+// 現行処方をアプリ用に整形（終了日・残り日数を計算して返す）
+function currentRx_() {
+  const today = startOfDay_(new Date());
+  return readRx_().filter(function (r) { return r.status === "現行"; }).map(function (r) {
+    let endDate = null, remainingDays = null;
+    if (r.start && r.days) {
+      const end = startOfDay_(r.start);
+      end.setDate(end.getDate() + r.days - 1);
+      endDate = fmtDate_(end);
+      remainingDays = Math.max(0, Math.round((end - today) / 86400000) + 1);
+    }
+    return {
+      name: r.name, category: r.category, usage: r.usage, timings: r.timings,
+      dose: r.dose, startDate: r.start ? fmtDate_(r.start) : null, days: r.days,
+      qty: r.qty, endDate: endDate, remainingDays: remainingDays, note: r.note,
+    };
+  });
+}
+
+// 今日すでに記録された服薬（薬名＋タイミング）の一覧
+function todayMeds_() {
+  const today = fmtDate_(new Date());
+  return readEvents_()
+    .filter(function (ev) { return ev.kind === "服薬" && fmtDate_(ev.at) === today; })
+    .map(function (ev) { return { med: ev.med, timing: ev.timing || "" }; });
+}
+
+/* =========================================================
+   夕食前リマインダー
+   毎日17時ごろ、夕食前の薬（グーフィス）が未記録ならメールを送る
+   処方期間が終わったら自動で送らなくなる
+   ========================================================= */
+function setupEveningReminder() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === "eveningReminder") ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger("eveningReminder").timeBased().everyDays(1).atHour(17).create();
+  SpreadsheetApp.getUi().alert("設定しました。毎日17時ごろ、夕食前の薬が未記録ならメールでお知らせします。\n（処方期間が終われば自動的に送信されなくなります）");
+}
+
+function eveningReminder() {
+  const today = startOfDay_(new Date());
+  // 夕食前に飲む現行の薬のうち、処方期間内のもの
+  const targets = currentRx_().filter(function (r) {
+    if (r.timings.indexOf("夕食前") < 0) return false;
+    if (r.endDate && fmtDate_(today) > r.endDate) return false; // 飲み切った後は通知しない
+    return true;
+  });
+  if (!targets.length) return;
+  const taken = todayMeds_().filter(function (m) { return m.timing === "夕食前"; }).map(function (m) { return m.med; });
+  const pending = targets.filter(function (r) { return taken.indexOf(r.name) < 0; });
+  if (!pending.length) return;
+  const names = pending.map(function (r) { return r.name; }).join("、");
+  MailApp.sendEmail(
+    Session.getEffectiveUser().getEmail(),
+    "【IBSログ】夕食前のお薬リマインダー（" + names + "）",
+    "夕食前に飲む薬（" + names + "）が今日はまだ記録されていません。\n\n" +
+    "※ グーフィスは必ず食事の「前」に服用してください（食後だと効果が弱まります）。\n\n" +
+    "飲んだら記録: https://runa-ha.github.io/ibs-tracker/\n" +
+    "（すでに飲んでいて記録し忘れていただけなら、アプリでチェックすれば明日からも正しく集計されます）"
+  );
+}
+
+/* =========================================================
    生ログの読み込み（見出し名で列を探すので列追加に強い）
    ========================================================= */
 function readEvents_() {
@@ -319,7 +557,8 @@ function readEvents_() {
   const head = values[0];
   const iKind = head.indexOf("種別"), iAt = head.indexOf("発生時刻"),
         iBri = head.indexOf("ブリストルスケール"), iPain = head.indexOf("腹痛"),
-        iZan = head.indexOf("残便感"), iMed = head.indexOf("薬名");
+        iZan = head.indexOf("残便感"), iMed = head.indexOf("薬名"),
+        iTim = head.indexOf("タイミング");
   const out = [];
   for (let r = 1; r < values.length; r++) {
     const at = values[r][iAt];
@@ -331,6 +570,7 @@ function readEvents_() {
       pain: String(values[r][iPain] || ""),
       zanben: String(values[r][iZan] || ""),
       med: String(values[r][iMed] || ""),
+      timing: iTim >= 0 ? String(values[r][iTim] || "") : "",
     });
   }
   out.sort((a, b) => a.at - b.at);
@@ -356,6 +596,9 @@ function readDaily_() {
       exercise: String(values[r][idx["運動"]] || ""),
       mood: numOrNull_(values[r][idx["気分"]]),
       stress: numOrNull_(values[r][idx["ストレス"]]),
+      obsTags: idx["観察タグ"] >= 0
+        ? String(values[r][idx["観察タグ"]] || "").split(",").map((s) => s.trim()).filter(String)
+        : [],
     };
   }
   return byDate;
@@ -379,6 +622,129 @@ function buildDashboard() {
   buildCycle_(states);
   buildMental_(states);
   buildRhythm_(events);
+  buildRxProgress_(states, daily, events);
+}
+
+/* =========================================================
+   処方経過（受診報告用）
+   排便記録と服薬記録を同じ日付で並べ、
+   グーフィス開始前後の排便リズム・便の硬さの変化を比較する
+   ========================================================= */
+function buildRxProgress_(states, daily, events) {
+  const rx = readRx_().filter(function (r) { return r.status === "現行"; });
+  if (rx.length === 0) return; // 処方シート未設定なら何もしない
+  const sh = resetSheet_(SHEET_RXLOG);
+
+  // 基準日 = グーフィスの開始日（なければ現行処方の最も早い開始日）
+  const gf = rx.filter(function (r) { return r.name.indexOf("グーフィス") >= 0; })[0];
+  const baseStart = (gf && gf.start) ||
+    rx.map(function (r) { return r.start; }).filter(Boolean).sort(function (a, b) { return a - b; })[0];
+  if (!baseStart) { sh.getRange(1, 1).setValue("処方シートに開始日が入っていません"); return; }
+  const startKey = fmtDate_(baseStart);
+
+  const stateByKey = {};
+  states.forEach(function (s) { stateByKey[s.key] = s; });
+
+  // 開始前7日と開始後の比較サマリー
+  function metrics(list) {
+    if (!list.length) return ["", "", "", ""];
+    let stool = 0, bSum = 0, bN = 0, cons = 0;
+    list.forEach(function (s) {
+      stool += s.stoolCount;
+      if (s.avgBristol != null) { bSum += s.avgBristol; bN++; }
+      if (s.state === "便秘日") cons++;
+    });
+    return [
+      list.length,
+      Math.round((stool / list.length) * 100) / 100,
+      bN ? Math.round((bSum / bN) * 10) / 10 : "",
+      Math.round((cons / list.length) * 100),
+    ];
+  }
+  const before = states.filter(function (s) {
+    const d = parseDate_(s.key), b = parseDate_(startKey);
+    const diff = (b - d) / 86400000;
+    return diff >= 1 && diff <= 7;
+  });
+  const after = states.filter(function (s) { return s.key >= startKey; });
+
+  sh.getRange(1, 1).setValue("処方経過レポート（" + startKey + " 開始）").setFontWeight("bold").setFontSize(12);
+  sh.getRange(2, 1, 1, 5).setValues([["期間", "日数", "排便回数/日", "平均ブリストル", "便秘日の割合(%)"]]).setFontWeight("bold");
+  sh.getRange(3, 1, 2, 5).setValues([
+    ["開始前7日"].concat(metrics(before)),
+    ["開始後"].concat(metrics(after)),
+  ]);
+
+  // 次回受診の目安（28日分の薬が終わる日）と各薬の終了日
+  const cur = currentRx_();
+  const endInfo = cur.filter(function (r) { return r.endDate; })
+    .map(function (r) { return r.name + ": " + r.endDate + "まで（あと" + r.remainingDays + "日）"; });
+  sh.getRange(6, 1).setValue("薬の終了日: " + (endInfo.join(" ／ ") || "－")).setFontSize(9);
+  const maxEnd = cur.map(function (r) { return r.endDate; }).filter(Boolean).sort().slice(-1)[0];
+  if (maxEnd) sh.getRange(7, 1).setValue("次回受診の目安: " + maxEnd + " ごろ（28日分の薬が終わる頃）").setFontSize(9).setFontWeight("bold");
+
+  // 日別テーブル（開始7日前〜今日）: 排便と服薬を同じ日付で横に並べる
+  const medNames = rx.map(function (r) { return r.name; });
+  const expected = {};
+  rx.forEach(function (r) { expected[r.name] = r.timings.indexOf("外用") >= 0 ? null : r.timings.length; });
+
+  // 日付ごとの薬別服用回数
+  const medByDay = {};
+  events.forEach(function (ev) {
+    if (ev.kind !== "服薬") return;
+    const key = fmtDate_(ev.at);
+    if (!medByDay[key]) medByDay[key] = {};
+    medByDay[key][ev.med] = (medByDay[key][ev.med] || 0) + 1;
+  });
+
+  const head = ["日付", "曜日", "ステート", "排便回数", "平均ブリストル", "腹痛"]
+    .concat(medNames.map(function (n) { return n; }))
+    .concat(["観察タグ"]);
+  const startRow = 9;
+  sh.getRange(startRow, 1, 1, head.length).setValues([head]).setFontWeight("bold");
+
+  const from = parseDate_(startKey);
+  from.setDate(from.getDate() - 7);
+  const today = startOfDay_(new Date());
+  const rows = [];
+  for (let d = new Date(from); d <= today; d.setDate(d.getDate() + 1)) {
+    const key = fmtDate_(d);
+    const s = stateByKey[key];
+    const dl = daily[key] || {};
+    const medCells = medNames.map(function (n) {
+      const c = (medByDay[key] && medByDay[key][n]) || 0;
+      if (!c) return "";
+      return expected[n] ? c + "/" + expected[n] : "○" + (c > 1 ? "×" + c : "");
+    });
+    rows.push(
+      [new Date(d), WEEKDAYS_JP[d.getDay()],
+       s ? s.state : "", s ? s.stoolCount : "", s ? orBlank_(s.avgBristol) : "", s && s.pain ? "あり" : ""]
+      .concat(medCells)
+      .concat([(dl.obsTags || []).join("、")])
+    );
+  }
+  if (rows.length) {
+    sh.getRange(startRow + 1, 1, rows.length, head.length).setValues(rows);
+    sh.getRange(startRow + 1, 1, rows.length, 1).setNumberFormat("M/d");
+    // 開始日の行に目印の背景色
+    for (let i = 0; i < rows.length; i++) {
+      if (fmtDate_(rows[i][0]) === startKey) {
+        sh.getRange(startRow + 1 + i, 1, 1, head.length).setBackground("#dbeafe");
+      }
+    }
+  }
+  sh.setFrozenRows(startRow);
+
+  if (rows.length < 2) return;
+  sh.insertChart(
+    sh.newChart().setChartType(Charts.ChartType.LINE)
+      .addRange(sh.getRange(startRow, 1, rows.length + 1, 1))
+      .addRange(sh.getRange(startRow, 4, rows.length + 1, 2))
+      .setPosition(2, 8, 0, 0)
+      .setOption("title", "排便回数と平均ブリストル値の推移（" + startKey + " 処方開始）")
+      .setOption("height", 320).setOption("width", 640)
+      .build()
+  );
 }
 
 /* =========================================================
