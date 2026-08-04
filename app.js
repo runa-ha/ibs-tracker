@@ -11,6 +11,7 @@
 const LS_QUEUE = "ibs_queue";       // 未送信データの保存キー
 const LS_SETTINGS = "ibs_settings"; // 設定マスタのキャッシュキー
 const LS_AUTH = "ibs_auth";         // 合言葉の保存キー（この端末の中にだけ保存される）
+const LS_DAILY = "ibs_daily_draft"; // 今日タブの下書き（日付が変わると自動リセット）
 
 const BRISTOL = [
   { n: 1, name: "コロコロ便", desc: "硬くて木の実のような便" },
@@ -35,6 +36,7 @@ const TIMING_ORDER = ["朝食後", "昼食後", "夕食前", "夕食後", "外�
 let settings = { medicines: [], tags: [], obsTags: [], alertDays: 3 }; // GASから取得（取得前はデフォルト）
 let prescriptions = []; // 現行処方（「処方」シート由来）
 let todayMeds = [];     // 今日すでに記録した服薬 [{med, timing}]
+let todayEvents = [];   // 今日の記録一覧（履歴表示用。サーバーから取得）
 let selectedBristol = null;
 let selectedPain = "なし";
 let selectedZanben = "なし";
@@ -44,9 +46,11 @@ let waterMl = 0;
 let selectedExercise = null;
 let selectedMood = null;
 let selectedStress = null;
-let selectedTags = new Set();
+// 食事タグは朝・昼・夕で別々に持つ
+let mealTags = { morning: new Set(), noon: new Set(), evening: new Set() };
 let selectedObsTags = new Set();
 let flushing = false;
+let dailyTimer = null; // 自動保存の待ち時間管理
 
 // ---------- 小道具 ----------
 const $ = (id) => document.getElementById(id);
@@ -64,6 +68,10 @@ function nowLocalString() {
   const d = new Date();
   d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
   return d.toISOString().slice(0, 16);
+}
+function nowTimeString() {
+  const d = new Date();
+  return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
 }
 function todayString() {
   const d = new Date();
@@ -87,6 +95,73 @@ function hideAuthPanel() {
   $("auth-panel").classList.add("hidden");
 }
 
+/* =========================================================
+   今日タブの下書き＆自動保存
+   - 入力のたびに端末へ下書き保存（アプリを閉じても丸一日残る）
+   - 数秒後にスプレッドシートの「今日の行」へ自動で上書き保存
+   - 日付が変わると入力欄は自動で新しい日にリセットされる
+   ========================================================= */
+function saveDraft() {
+  const draft = {
+    date: todayString(),
+    sleep: sleepHours,
+    water: waterMl,
+    exercise: selectedExercise,
+    mood: selectedMood,
+    stress: selectedStress,
+    obsTags: Array.from(selectedObsTags),
+    meals: {
+      morning: { tags: Array.from(mealTags.morning), memo: $("meal-memo-morning").value.trim() },
+      noon: { tags: Array.from(mealTags.noon), memo: $("meal-memo-noon").value.trim() },
+      evening: { tags: Array.from(mealTags.evening), memo: $("meal-memo-evening").value.trim() },
+    },
+    mentalMemo: $("mental-memo").value.trim(),
+    memo: $("daily-memo").value.trim(),
+  };
+  localStorage.setItem(LS_DAILY, JSON.stringify(draft));
+  scheduleDailySend();
+}
+
+function loadDraft() {
+  try {
+    const d = JSON.parse(localStorage.getItem(LS_DAILY));
+    if (d && d.date === todayString()) return d; // 今日の下書きだけ有効
+  } catch (e) { /* 無視 */ }
+  return null;
+}
+
+// 連続入力中は待って、手が止まったらまとめて送信する
+function scheduleDailySend() {
+  updateSaveStatus("✏️ 入力中…");
+  clearTimeout(dailyTimer);
+  dailyTimer = setTimeout(sendDaily, 2500);
+}
+
+function sendDaily() {
+  const draft = loadDraft();
+  if (!draft) return; // 日付が変わっていたら送らない
+  submitPayload({
+    type: "daily",
+    data: {
+      date: draft.date,
+      sleep: draft.sleep,
+      meals: draft.meals,
+      water: draft.water,
+      exercise: draft.exercise || "",
+      mood: draft.mood || "",
+      stress: draft.stress || "",
+      obsTags: draft.obsTags || [],
+      mentalMemo: draft.mentalMemo || "",
+      memo: draft.memo || "",
+    },
+  });
+}
+
+function updateSaveStatus(text) {
+  const el = $("daily-save-status");
+  if (el) el.textContent = text;
+}
+
 // ---------- 送信キュー ----------
 function loadQueue() {
   try { return JSON.parse(localStorage.getItem(LS_QUEUE)) || []; } catch (e) { return []; }
@@ -105,13 +180,24 @@ function updateQueueBadge() {
 // 記録をキューに積んでから送信を試みる
 async function submitPayload(payload) {
   payload.clientId = Date.now() + "-" + Math.random().toString(36).slice(2); // 重複判定用ID
-  const q = loadQueue();
+  let q = loadQueue();
+  // デイリーの自動保存は「同じ日の送信待ち」を置き換える（重複させない）
+  if (payload.type === "daily") {
+    q = q.filter((i) => !(i.type === "daily" && i.data && i.data.date === payload.data.date));
+  }
   q.push(payload);
   saveQueue(q);
   await flushQueue();
+
+  if (payload.type === "daily") {
+    // 今日タブの自動保存は控えめに状態表示だけ更新（トーストは出さない）
+    const pending = loadQueue().some((i) => i.type === "daily");
+    updateSaveStatus(pending ? "📡 未送信（電波が戻れば自動保存されます）" : "☁️ 保存済み " + nowTimeString());
+    return;
+  }
   if (loadQueue().length === 0) {
     toast("✅ 記録しました");
-    fetchStatus(); // 集計カードを更新
+    fetchStatus(); // 集計カード・履歴を更新
   } else {
     toast("📡 電波がないため保存しました（復帰後に自動送信）", 3500);
   }
@@ -180,10 +266,12 @@ async function fetchStatus() {
     settings = json.settings;
     prescriptions = json.prescriptions || [];
     todayMeds = json.todayMeds || [];
+    todayEvents = json.todayEvents || [];
     // 処方もキャッシュしておく（オフライン起動時もチェックリストを出すため）
     localStorage.setItem(LS_SETTINGS, JSON.stringify({ settings: settings, prescriptions: prescriptions }));
     renderMasters();
     renderChecklist();
+    renderHistory();
     renderSummary(json.summary);
   } catch (e) {
     console.warn("集計の取得に失敗（オフライン？）:", e);
@@ -229,14 +317,16 @@ function renderMasters() {
     medWrap.appendChild(b);
   });
 
-  // 食事タグ
-  buildChips_("tag-chips", settings.tags, selectedTags, "タグが未取得です");
+  // 食事タグ（朝・昼・夕それぞれ）
+  buildChips_("tag-chips-morning", settings.tags, mealTags.morning, "タグが未取得です", saveDraft);
+  buildChips_("tag-chips-noon", settings.tags, mealTags.noon, "タグが未取得です", saveDraft);
+  buildChips_("tag-chips-evening", settings.tags, mealTags.evening, "タグが未取得です", saveDraft);
   // 観察タグ（副作用チェック用）
-  buildChips_("obs-chips", settings.obsTags || [], selectedObsTags, "処方アップデート後に表示されます");
+  buildChips_("obs-chips", settings.obsTags || [], selectedObsTags, "アップデート適用後に表示されます", saveDraft);
 }
 
 // タグ選択チップを作る共通処理
-function buildChips_(containerId, names, selectedSet, emptyMsg) {
+function buildChips_(containerId, names, selectedSet, emptyMsg, onToggle) {
   const wrap = $(containerId);
   wrap.innerHTML = "";
   if (!names.length) {
@@ -252,8 +342,58 @@ function buildChips_(containerId, names, selectedSet, emptyMsg) {
       if (selectedSet.has(name)) selectedSet.delete(name);
       else selectedSet.add(name);
       c.classList.toggle("selected");
+      if (onToggle) onToggle();
     };
     wrap.appendChild(c);
+  });
+}
+
+/* =========================================================
+   今日の記録（履歴表示）
+   サーバーに保存済みの分＋送信待ちの分をまとめて時刻順に表示
+   ========================================================= */
+function renderHistory() {
+  const wrap = $("today-history");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+
+  const items = todayEvents.slice();
+  // 送信待ちキューの中の「今日のイベント」も表示に含める
+  loadQueue().forEach((qi) => {
+    if (qi.type !== "event" || !qi.data) return;
+    const at = new Date(qi.data.occurredAt || Date.now());
+    const d = new Date(at); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+    if (d.toISOString().slice(0, 10) !== todayString()) return;
+    items.push({
+      time: ("0" + at.getHours()).slice(-2) + ":" + ("0" + at.getMinutes()).slice(-2),
+      kind: qi.data.kind, bristol: qi.data.bristol, pain: qi.data.pain,
+      med: qi.data.med, timing: qi.data.timing || "", memo: qi.data.memo || "",
+      pending: true,
+    });
+  });
+
+  if (!items.length) {
+    wrap.innerHTML = '<div class="loading-note">今日はまだ記録がありません</div>';
+    return;
+  }
+  items.sort((a, b) => (a.time < b.time ? -1 : 1));
+  items.forEach((ev) => {
+    const div = document.createElement("div");
+    div.className = "history-item";
+    let text;
+    if (ev.kind === "排便") {
+      text = "💩 ブリストル" + (ev.bristol || "?") + "・腹痛" + (ev.pain || "なし");
+    } else if (ev.kind === "服薬") {
+      text = "💊 " + ev.med + (ev.timing ? "（" + ev.timing + "）" : "");
+    } else {
+      text = ev.kind;
+    }
+    div.innerHTML =
+      '<span class="history-time">' + ev.time + "</span>" +
+      '<span class="history-text">' + text +
+      (ev.memo ? '<small>' + ev.memo + "</small>" : "") + "</span>" +
+      (ev.pending ? '<span class="history-pending">⏳送信待ち</span>' : "");
+    wrap.appendChild(div);
   });
 }
 
@@ -335,6 +475,7 @@ function toggleMedCheck(p, slot) {
     type: "event",
     data: { kind: "服薬", med: p.name, timing: slot, occurredAt: new Date().toISOString() },
   });
+  renderHistory(); // 「今日の記録」にすぐ反映
 }
 
 // 固定選択肢のボタン群を作る（汎用）
@@ -344,11 +485,20 @@ function buildSeg(containerId, options, onSelect, labels) {
   options.forEach((opt, i) => {
     const b = document.createElement("button");
     b.textContent = labels ? labels[i] : opt;
+    b.dataset.val = String(opt); // 復元用（絵文字ボタンでも値で選択できるように）
     b.onclick = () => {
       wrap.querySelectorAll("button").forEach((x) => x.classList.toggle("selected", x === b));
       onSelect(opt);
     };
     wrap.appendChild(b);
+  });
+}
+
+// 保存されている値からボタンの選択状態を復元する
+function selectByVal(containerId, val) {
+  if (val == null || val === "") return;
+  $(containerId).querySelectorAll("button").forEach((b) => {
+    b.classList.toggle("selected", b.dataset.val === String(val));
   });
 }
 
@@ -385,6 +535,7 @@ function submitStool() {
       memo: $("stool-memo").value.trim(),
     },
   });
+  renderHistory(); // 「今日の記録」にすぐ反映
   // 入力をリセット
   selectedBristol = null;
   selectedPain = "なし";
@@ -410,6 +561,7 @@ function submitMed() {
       memo: $("med-memo").value.trim(),
     },
   });
+  renderHistory(); // 「今日の記録」にすぐ反映
   selectedMed = null;
   $("med-memo").value = "";
   $("med-detail").classList.add("hidden");
@@ -417,28 +569,8 @@ function submitMed() {
   $("med-time").value = nowLocalString();
 }
 
-function submitDaily() {
-  if (selectedMood == null && selectedStress == null && selectedTags.size === 0 && selectedExercise == null) {
-    toast("何か1つ以上入力してください");
-    return;
-  }
-  submitPayload({
-    type: "daily",
-    data: {
-      date: $("daily-date").value || todayString(),
-      sleep: sleepHours,
-      tags: Array.from(selectedTags),
-      mealMemo: $("meal-memo").value.trim(),
-      water: waterMl,
-      exercise: selectedExercise || "",
-      mood: selectedMood || "",
-      stress: selectedStress || "",
-      mentalMemo: $("mental-memo").value.trim(),
-      memo: $("daily-memo").value.trim(),
-      obsTags: Array.from(selectedObsTags),
-    },
-  });
-}
+// ※「今日のまとめ」は保存ボタン方式をやめ、入力のたびに自動保存する
+//   （saveDraft → scheduleDailySend → sendDaily の流れ）
 
 // 指定した値のボタンを選択状態にする（デフォルト値の見た目用）
 function selectDefault(containerId, value) {
@@ -476,15 +608,51 @@ function init() {
   $("submit-med").onclick = submitMed;
 
   // 今日タブの部品
-  $("daily-date").value = todayString();
-  $("sleep-minus").onclick = () => { sleepHours = Math.max(0, sleepHours - 0.5); $("sleep-value").textContent = sleepHours.toFixed(1); };
-  $("sleep-plus").onclick = () => { sleepHours = Math.min(16, sleepHours + 0.5); $("sleep-value").textContent = sleepHours.toFixed(1); };
-  $("water-minus").onclick = () => { waterMl = Math.max(0, waterMl - 250); $("water-value").textContent = waterMl; };
-  $("water-plus").onclick = () => { waterMl += 250; $("water-value").textContent = waterMl; };
-  buildSeg("exercise-seg", EXERCISE_OPTIONS, (v) => (selectedExercise = v));
-  buildSeg("mood-seg", [1, 2, 3, 4, 5], (v) => (selectedMood = v), MOOD_EMOJI);
-  buildSeg("stress-seg", [1, 2, 3, 4, 5], (v) => (selectedStress = v));
-  $("submit-daily").onclick = submitDaily;
+  const d = new Date();
+  $("daily-date-label").textContent = (d.getMonth() + 1) + "/" + d.getDate() + "(" + ["日", "月", "火", "水", "木", "金", "土"][d.getDay()] + ")";
+
+  // 今日の下書きがあれば復元（アプリを閉じても丸一日残る）
+  const draft = loadDraft();
+  if (draft) {
+    if (draft.sleep != null) sleepHours = draft.sleep;
+    waterMl = draft.water || 0;
+    selectedExercise = draft.exercise || null;
+    selectedMood = draft.mood || null;
+    selectedStress = draft.stress || null;
+    selectedObsTags = new Set(draft.obsTags || []);
+    const meals = draft.meals || {};
+    ["morning", "noon", "evening"].forEach((k) => {
+      mealTags[k] = new Set((meals[k] && meals[k].tags) || []);
+      $("meal-memo-" + k).value = (meals[k] && meals[k].memo) || "";
+    });
+    $("mental-memo").value = draft.mentalMemo || "";
+    $("daily-memo").value = draft.memo || "";
+    updateSaveStatus("☁️ 下書きを復元しました（自動保存は有効です）");
+  }
+
+  const updateSleepView = () => { $("sleep-value").textContent = sleepHours.toFixed(1); };
+  const updateWaterView = () => {
+    $("water-value").textContent = waterMl;
+    $("water-cups").textContent = waterMl > 0 ? "（コップ約" + Math.round(waterMl / 250) + "杯）" : "";
+  };
+  updateSleepView();
+  updateWaterView();
+
+  $("sleep-minus").onclick = () => { sleepHours = Math.max(0, sleepHours - 0.5); updateSleepView(); saveDraft(); };
+  $("sleep-plus").onclick = () => { sleepHours = Math.min(16, sleepHours + 0.5); updateSleepView(); saveDraft(); };
+  $("water-minus").onclick = () => { waterMl = Math.max(0, waterMl - 250); updateWaterView(); saveDraft(); };
+  $("water-plus").onclick = () => { waterMl += 250; updateWaterView(); saveDraft(); };
+  buildSeg("exercise-seg", EXERCISE_OPTIONS, (v) => { selectedExercise = v; saveDraft(); });
+  buildSeg("mood-seg", [1, 2, 3, 4, 5], (v) => { selectedMood = v; saveDraft(); }, MOOD_EMOJI);
+  buildSeg("stress-seg", [1, 2, 3, 4, 5], (v) => { selectedStress = v; saveDraft(); });
+  selectByVal("exercise-seg", selectedExercise);
+  selectByVal("mood-seg", selectedMood);
+  selectByVal("stress-seg", selectedStress);
+
+  // メモ類は入力が止まったら自動保存
+  ["meal-memo-morning", "meal-memo-noon", "meal-memo-evening", "mental-memo", "daily-memo"].forEach((id) => {
+    $(id).addEventListener("input", saveDraft);
+  });
 
   // 合言葉の保存ボタン
   $("auth-save").onclick = () => {
@@ -510,6 +678,7 @@ function init() {
   } catch (e) { /* 無視 */ }
   renderMasters();
   renderChecklist();
+  renderHistory();
 
   // オンライン/オフライン表示と自動再送
   const updateNet = () => {

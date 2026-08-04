@@ -56,6 +56,10 @@
   <!-- ========== 記録タブ（イベント入力） ========== -->
   <section id="tab-record" class="tab active">
 
+    <h2>今日の記録</h2>
+    <!-- 今日入力した排便・服薬の一覧（重複入力の防止用） -->
+    <div id="today-history" class="history"><div class="loading-note">読み込み中…</div></div>
+
     <h2>排便を記録</h2>
     <div class="field-row">
       <label for="stool-time">発生時刻</label>
@@ -98,12 +102,9 @@
 
   <!-- ========== 今日タブ（デイリー入力） ========== -->
   <section id="tab-daily" class="tab">
-    <h2>今日のまとめ</h2>
-
-    <div class="field-row">
-      <label for="daily-date">日付</label>
-      <input type="date" id="daily-date">
-    </div>
+    <h2>今日のまとめ <span id="daily-date-label" class="date-label"></span></h2>
+    <!-- 入力はすべて自動でスプレッドシートの「今日の行」に保存される -->
+    <div id="daily-save-status" class="save-status">☁️ 入力すると自動で保存されます</div>
 
     <div class="group-label">睡眠時間</div>
     <div class="stepper">
@@ -112,14 +113,22 @@
       <button type="button" id="sleep-plus">＋</button>
     </div>
 
-    <div class="group-label">食事タグ（当てはまるものを全部タップ）</div>
-    <div id="tag-chips" class="chip-wrap"><div class="loading-note">タグを読み込み中…</div></div>
-    <input type="text" id="meal-memo" class="memo-input" placeholder="食事メモ（例：昼にラーメン）">
+    <div class="group-label">🍞 朝食のタグ（当てはまるものをタップ）</div>
+    <div id="tag-chips-morning" class="chip-wrap"><div class="loading-note">タグを読み込み中…</div></div>
+    <input type="text" id="meal-memo-morning" class="memo-input" placeholder="朝食メモ（例：パンとヨーグルト）">
 
-    <div class="group-label">水分量</div>
+    <div class="group-label">🍜 昼食のタグ</div>
+    <div id="tag-chips-noon" class="chip-wrap"><div class="loading-note">タグを読み込み中…</div></div>
+    <input type="text" id="meal-memo-noon" class="memo-input" placeholder="昼食メモ（例：ラーメン）">
+
+    <div class="group-label">🍚 夕食のタグ</div>
+    <div id="tag-chips-evening" class="chip-wrap"><div class="loading-note">タグを読み込み中…</div></div>
+    <input type="text" id="meal-memo-evening" class="memo-input" placeholder="夕食メモ（例：カレー）">
+
+    <div class="group-label">水分量（1日の合計。飲むたびに＋250）</div>
     <div class="stepper">
       <button type="button" id="water-minus">−250</button>
-      <span class="stepper-value"><span id="water-value">0</span> ml</span>
+      <span class="stepper-value"><span id="water-value">0</span> ml <small id="water-cups"></small></span>
       <button type="button" id="water-plus">＋250</button>
     </div>
 
@@ -137,8 +146,6 @@
 
     <input type="text" id="mental-memo" class="memo-input" placeholder="メンタルメモ（任意。気分やストレスの背景など）">
     <input type="text" id="daily-memo" class="memo-input" placeholder="メモ（任意）">
-
-    <button id="submit-daily" class="btn-primary">今日の記録を保存する</button>
   </section>
 </main>
 

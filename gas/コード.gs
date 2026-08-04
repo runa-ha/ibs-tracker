@@ -103,8 +103,25 @@ function onOpen() {
     .addItem("日次トリガーを設定（毎朝5時に自動更新）", "setupDailyTrigger")
     .addSeparator()
     .addItem("処方アップデート(2026-07-31)を適用", "applyRxUpdate20260731")
+    .addItem("アップデート(2026-08-02)を適用", "applyUpdate20260802")
     .addItem("初期セットアップ（最初に1回）", "initialSetup")
     .addToUi();
+}
+
+/* =========================================================
+   アップデート(2026-08-02)の適用
+   食事の朝昼夕分割に対応する列をデイリーログに追加する。
+   何度実行しても安全
+   ========================================================= */
+function applyUpdate20260802() {
+  const done = [];
+  const dl = mustSheet_(SHEET_DAILY);
+  ["朝食タグ", "朝食メモ", "昼食タグ", "昼食メモ", "夕食タグ", "夕食メモ"].forEach(function (h) {
+    if (ensureHeader_(dl, h)) done.push("デイリーログに「" + h + "」列を追加");
+  });
+  SpreadsheetApp.getUi().alert(
+    done.length ? "アップデートを適用しました。\n\n・" + done.join("\n・") : "すでに適用済みです（変更はありません）。"
+  );
 }
 
 /* =========================================================
@@ -285,6 +302,7 @@ function doPost(e) {
         summary: computeSummary_(cfg),
         prescriptions: currentRx_(),
         todayMeds: todayMeds_(),
+        todayEvents: todayEvents_(),
       });
     }
     if (body.type === "event") {
@@ -328,11 +346,31 @@ function appendEvent_(d) {
 // デイリーログを追記（同じ日付が既にあれば上書き）
 function upsertDaily_(d) {
   const sh = mustSheet_(SHEET_DAILY);
+
+  // 朝昼夕の食事（新形式）。旧形式（tags/mealMemo）で来た場合もそのまま動く
+  const meals = d.meals || {};
+  const meal = function (k) { return meals[k] || {}; };
+  const unionTags = [];
+  ["morning", "noon", "evening"].forEach(function (k) {
+    (meal(k).tags || []).forEach(function (t) { if (unionTags.indexOf(t) < 0) unionTags.push(t); });
+  });
+  (d.tags || []).forEach(function (t) { if (unionTags.indexOf(t) < 0) unionTags.push(t); });
+  const memoParts = [];
+  if (meal("morning").memo) memoParts.push("朝:" + meal("morning").memo);
+  if (meal("noon").memo) memoParts.push("昼:" + meal("noon").memo);
+  if (meal("evening").memo) memoParts.push("夕:" + meal("evening").memo);
+
   const map = {
     "日付": d.date || fmtDate_(new Date()),
     "睡眠時間": d.sleep === "" || d.sleep == null ? "" : Number(d.sleep),
-    "食事タグ": (d.tags || []).join(","),
-    "食事メモ": d.mealMemo || "",
+    "食事タグ": unionTags.join(","), // 3食の合算（トリガー分析はこの列を使う）
+    "食事メモ": d.mealMemo || memoParts.join(" ／ "),
+    "朝食タグ": (meal("morning").tags || []).join(","),
+    "朝食メモ": meal("morning").memo || "",
+    "昼食タグ": (meal("noon").tags || []).join(","),
+    "昼食メモ": meal("noon").memo || "",
+    "夕食タグ": (meal("evening").tags || []).join(","),
+    "夕食メモ": meal("evening").memo || "",
     "水分量": d.water === "" || d.water == null ? "" : Number(d.water),
     "運動": d.exercise || "",
     "気分": d.mood || "",
@@ -553,6 +591,24 @@ function todayMeds_() {
     .map(function (ev) { return { med: ev.med, timing: ev.timing || "" }; });
 }
 
+// 今日の全イベント（アプリの「今日の記録」履歴表示用）
+function todayEvents_() {
+  const today = fmtDate_(new Date());
+  return readEvents_()
+    .filter(function (ev) { return fmtDate_(ev.at) === today; })
+    .map(function (ev) {
+      return {
+        time: Utilities.formatDate(ev.at, TZ, "HH:mm"),
+        kind: ev.kind,
+        bristol: ev.bristol,
+        pain: ev.pain,
+        med: ev.med,
+        timing: ev.timing || "",
+        memo: ev.memo || "",
+      };
+    });
+}
+
 /* =========================================================
    夕食前リマインダーは不要とのことで廃止。
    万一トリガーが設定済みだった場合も、実行時に自動で解除される
@@ -574,7 +630,7 @@ function readEvents_() {
   const iKind = head.indexOf("種別"), iAt = head.indexOf("発生時刻"),
         iBri = head.indexOf("ブリストルスケール"), iPain = head.indexOf("腹痛"),
         iZan = head.indexOf("残便感"), iMed = head.indexOf("薬名"),
-        iTim = head.indexOf("タイミング");
+        iTim = head.indexOf("タイミング"), iMemo = head.indexOf("メモ");
   const out = [];
   for (let r = 1; r < values.length; r++) {
     const at = values[r][iAt];
@@ -587,6 +643,7 @@ function readEvents_() {
       zanben: String(values[r][iZan] || ""),
       med: String(values[r][iMed] || ""),
       timing: iTim >= 0 ? String(values[r][iTim] || "") : "",
+      memo: iMemo >= 0 ? String(values[r][iMemo] || "") : "",
     });
   }
   out.sort((a, b) => a.at - b.at);
@@ -639,6 +696,82 @@ function buildDashboard() {
   buildMental_(states);
   buildRhythm_(events);
   buildRxProgress_(states, daily, events);
+  buildLegend_();
+}
+
+/* =========================================================
+   説明・凡例シート
+   各シートの見方、ブリストルスケールの説明、色分けの凡例
+   ========================================================= */
+function buildLegend_() {
+  const sh = resetSheet_("説明・凡例");
+  sh.setColumnWidth(1, 130);
+  sh.setColumnWidth(2, 460);
+  sh.setColumnWidth(3, 160);
+  let r = 1;
+
+  // --- 各シートの見方 ---
+  sh.getRange(r, 1).setValue("📖 各シートの見方").setFontWeight("bold").setFontSize(13);
+  r += 1;
+  const guide = [
+    ["シート名", "何が見られるか"],
+    ["イベントログ", "排便・服薬の生記録（1行＝1回）。アプリから自動追記される"],
+    ["デイリーログ", "1日1行の生活記録（睡眠・食事・気分など）。アプリから自動保存される"],
+    ["設定", "薬・食事タグ・観察タグ・しきい値・合言葉。ここを編集するとアプリに反映"],
+    ["処方", "現行・頓服・過去の薬。処方が変わったらここを編集"],
+    ["日別ステート", "毎日を「便秘日/通常日/下痢日」に自動分類した表。すべての分析の土台"],
+    ["週次サマリー", "週ごとの排便回数・便の状態・腹痛・服薬の推移（グラフ付き）"],
+    ["トリガー分析", "食べた物タグ別に「翌日に悪化しやすいか」を比較。数字のセルが赤いほど悪化傾向"],
+    ["カレンダービュー", "日々の状態をカレンダー形式で色分け（凡例は下記）"],
+    ["サイクルビュー", "便秘→腹痛→下痢の波を1つのグラフで見る。下向き＝便秘の深さ、上向き＝下痢の強さ"],
+    ["メンタル×体調", "気分・ストレス・睡眠と、同日/翌日の症状の関係"],
+    ["排便リズム", "排便が多い時間帯・曜日"],
+    ["処方経過", "受診報告用。薬の服用と排便の変化を日付で並べた表（青い行＝処方開始日）"],
+  ];
+  sh.getRange(r, 1, guide.length, 2).setValues(guide);
+  sh.getRange(r, 1, 1, 2).setFontWeight("bold").setBackground("#e5e7eb");
+  r += guide.length + 2;
+
+  // --- ブリストルスケールとは ---
+  sh.getRange(r, 1).setValue("💩 ブリストルスケールとは").setFontWeight("bold").setFontSize(13);
+  sh.getRange(r + 1, 1, 1, 3).setValues([["便の形を1〜7の数字で表す世界共通の物差しです。4が理想的な状態。1に近いほど便秘傾向、7に近いほど下痢傾向です。", "", ""]]);
+  r += 3;
+  const BRISTOL_LEGEND = [
+    [1, "コロコロ便（硬くて木の実のよう）", "強い便秘傾向", "#92400e"],
+    [2, "硬い便（ソーセージ状だが硬い）", "便秘傾向", "#b45309"],
+    [3, "やや硬い便（表面にひび割れ）", "やや便秘傾向", "#d97706"],
+    [4, "普通便（なめらかなバナナ状）", "理想的", "#0e9488"],
+    [5, "やや軟らかい便（半固形）", "やや下痢傾向", "#f59e0b"],
+    [6, "泥状便（形がくずれている）", "下痢傾向", "#f97316"],
+    [7, "水様便（固形物がない液体）", "強い下痢傾向", "#dc2626"],
+  ];
+  sh.getRange(r, 1, 1, 3).setValues([["番号", "便の状態", "意味"]]).setFontWeight("bold").setBackground("#e5e7eb");
+  BRISTOL_LEGEND.forEach(function (b, i) {
+    sh.getRange(r + 1 + i, 1, 1, 3).setValues([[b[0], b[1], b[2]]]);
+    sh.getRange(r + 1 + i, 1).setBackground(b[3]).setFontColor("#ffffff").setFontWeight("bold").setHorizontalAlignment("center");
+  });
+  r += BRISTOL_LEGEND.length + 3;
+
+  // --- カレンダービューの色分け ---
+  sh.getRange(r, 1).setValue("🗓 カレンダービューの色分け").setFontWeight("bold").setFontSize(13);
+  r += 1;
+  const AMBER = ["#fef3c7", "#fde68a", "#fcd34d", "#f59e0b", "#d97706"];
+  const RED = ["#fecaca", "#fca5a5", "#f87171", "#ef4444", "#dc2626"];
+  sh.getRange(r, 1).setValue("便秘日");
+  sh.getRange(r, 2).setValue("排便がなかった日。連続日数が長いほど色が濃い（1日→5日以上）");
+  AMBER.forEach(function (c, i) { sh.getRange(r, 3 + i).setBackground(c); });
+  r += 1;
+  sh.getRange(r, 1).setValue("通常日").setBackground("#e5e7eb");
+  sh.getRange(r, 2).setValue("普通の排便があった日");
+  r += 1;
+  sh.getRange(r, 1).setValue("下痢日");
+  sh.getRange(r, 2).setValue("下痢だった日。回数×硬さが強いほど色が濃い");
+  RED.forEach(function (c, i) { sh.getRange(r, 3 + i).setBackground(c); });
+  r += 1;
+  sh.getRange(r, 1).setValue("▲マーク");
+  sh.getRange(r, 2).setValue("その日に腹痛があったことを示す");
+  r += 2;
+  sh.getRange(r, 1).setValue("※ 判定のしきい値（下痢と判定するブリストル値・回数、便秘の警戒日数）は「設定」シートで変更できます").setFontSize(9);
 }
 
 /* =========================================================
