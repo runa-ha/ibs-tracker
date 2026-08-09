@@ -125,6 +125,9 @@
     <div id="tag-chips-evening" class="chip-wrap"><div class="loading-note">タグを読み込み中…</div></div>
     <input type="text" id="meal-memo-evening" class="memo-input" placeholder="夕食メモ（例：カレー）">
 
+    <div class="group-label">食事の満腹度（今日全体の感覚）</div>
+    <div class="seg seg-col" id="fullness-seg"></div>
+
     <div class="group-label">水分量（1日の合計。飲むたびに＋250）</div>
     <div class="stepper">
       <button type="button" id="water-minus">−250</button>
@@ -134,6 +137,9 @@
 
     <div class="group-label">体調の観察（薬の副作用チェックなど。当てはまるものをタップ）</div>
     <div id="obs-chips" class="chip-wrap"><div class="loading-note">読み込み中…</div></div>
+
+    <div class="group-label">生理（開始日だけタップ。翌日以降は押さなくてOK）</div>
+    <div class="chip-wrap"><button type="button" id="period-chip" class="chip">🩸 今日が生理開始日</button></div>
 
     <div class="group-label">運動</div>
     <div class="seg" id="exercise-seg"></div>

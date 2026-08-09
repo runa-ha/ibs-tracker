@@ -26,9 +26,15 @@ const SHEET_MENTAL = "メンタル×体調";
 const SHEET_RHYTHM = "排便リズム";
 const SHEET_RX = "処方";           // 処方の管理（現行/過去）
 const SHEET_RXLOG = "処方経過";     // 受診報告用の日別ビュー
+const SHEET_PERIOD = "周期ログ";    // 生理周期の開始日
+const SHEET_PERIOD_ANALYSIS = "周期×体調"; // 生理周期と症状の分析
+
+// 満腹度の選択肢（アプリ側と合わせる）
+const FULLNESS_OPTIONS = ["食べすぎて気持ち悪い", "胃もたれ", "ちょうどよく満腹", "八分目", "足りない"];
 
 const EVENT_HEADERS = ["記録日時", "種別", "発生時刻", "ブリストルスケール", "腹痛", "残便感", "薬名", "タイミング", "メモ"];
-const DAILY_HEADERS = ["日付", "睡眠時間", "食事タグ", "食事メモ", "水分量", "運動", "気分", "ストレス", "メンタルメモ", "メモ", "観察タグ"];
+const DAILY_HEADERS = ["日付", "睡眠時間", "食事タグ", "食事メモ", "水分量", "運動", "気分", "ストレス", "メンタルメモ", "メモ", "観察タグ",
+                       "朝食タグ", "朝食メモ", "昼食タグ", "昼食メモ", "夕食タグ", "夕食メモ", "満腹度"];
 const RX_HEADERS = ["薬名", "状態", "分類", "用法", "タイミング", "1回量", "開始日", "日数", "数量", "終了日", "服用メモ", "表示順"];
 
 // 服薬チェックのタイミング表示順
@@ -101,11 +107,123 @@ function onOpen() {
     .createMenu("IBS分析")
     .addItem("ダッシュボードを今すぐ更新", "buildDashboard")
     .addItem("日次トリガーを設定（毎朝5時に自動更新）", "setupDailyTrigger")
+    .addItem("重複記録をチェックして削除", "cleanDuplicateEvents")
     .addSeparator()
     .addItem("処方アップデート(2026-07-31)を適用", "applyRxUpdate20260731")
     .addItem("アップデート(2026-08-02)を適用", "applyUpdate20260802")
+    .addItem("アップデート(2026-08-10)を適用", "applyUpdate20260810")
     .addItem("初期セットアップ（最初に1回）", "initialSetup")
     .addToUi();
+}
+
+/* =========================================================
+   アップデート(2026-08-10)の適用
+   - デイリーログに「満腹度」列を追加
+   - イベントログに「クライアントID」列を追加（二重送信の防止用）
+   - 「周期ログ」シートを作成（生理周期。初回データとして2026-08-05を登録）
+   - 処方シートの「日数」列の書式不具合を修復（1970-01-01バグの根治）
+   何度実行しても安全
+   ========================================================= */
+function applyUpdate20260810() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const done = [];
+
+  // 1) 列の追加
+  if (ensureHeader_(mustSheet_(SHEET_DAILY), "満腹度")) done.push("デイリーログに「満腹度」列を追加");
+  if (ensureHeader_(mustSheet_(SHEET_EVENT), "クライアントID")) done.push("イベントログに「クライアントID」列を追加（二重送信防止用）");
+
+  // 2) 周期ログシート（生理周期の開始日を記録する）
+  if (!ss.getSheetByName(SHEET_PERIOD)) {
+    const sh = ss.insertSheet(SHEET_PERIOD);
+    sh.getRange(1, 1, 1, 2).setValues([["開始日", "メモ"]]).setFontWeight("bold");
+    sh.setFrozenRows(1);
+    // デイリーログのメモ「生理開始」(2026-08-05)から初回データを登録
+    sh.getRange(2, 1, 1, 2).setValues([[new Date(2026, 7, 5), "デイリーログのメモから自動登録"]]);
+    sh.getRange(2, 1, 100, 1).setNumberFormat("yyyy-mm-dd");
+    done.push("「周期ログ」シートを作成（8/5の「生理開始」メモを初回データとして登録）");
+  }
+
+  // 3) 処方シートの「日数」列の修復
+  //    誤って日付書式になっていたセル（28→1900-01-27）を数値に戻す
+  const rx = ss.getSheetByName(SHEET_RX);
+  if (rx) {
+    const values = rx.getDataRange().getValues();
+    const head = values[0];
+    const dCol = head.indexOf("日数");
+    if (dCol >= 0) {
+      let fixed = 0;
+      for (let r = 1; r < values.length; r++) {
+        const v = values[r][dCol];
+        if (v instanceof Date) {
+          rx.getRange(r + 1, dCol + 1).setValue(readDayCount_(v));
+          fixed++;
+        }
+      }
+      if (values.length > 1) rx.getRange(2, dCol + 1, values.length - 1, 1).setNumberFormat("0");
+      if (fixed) done.push("処方シートの「日数」列を修復（" + fixed + "件を日付→数値に戻しました）");
+    }
+  }
+
+  SpreadsheetApp.getUi().alert(
+    done.length
+      ? "アップデートを適用しました。\n\n・" + done.join("\n・") +
+        "\n\nこのあと「重複記録をチェックして削除」と「ダッシュボードを今すぐ更新」も実行してください。"
+      : "すでに適用済みです（変更はありません）。"
+  );
+}
+
+/* =========================================================
+   重複記録のクリーニング
+   「種別・薬名・タイミング・ブリストル・発生時刻（分単位）」が
+   すべて同じ行を重複とみなし、最初の1件だけ残して削除する
+   ========================================================= */
+function cleanDuplicateEvents() {
+  const sh = mustSheet_(SHEET_EVENT);
+  const values = sh.getDataRange().getValues();
+  if (values.length < 3) {
+    SpreadsheetApp.getUi().alert("記録が少ないためチェック対象がありません。");
+    return;
+  }
+  const head = values[0];
+  const iKind = head.indexOf("種別"), iAt = head.indexOf("発生時刻"),
+        iBri = head.indexOf("ブリストルスケール"), iMed = head.indexOf("薬名"),
+        iTim = head.indexOf("タイミング");
+
+  const seen = {};
+  const toDelete = []; // {row, label}
+  for (let r = 1; r < values.length; r++) {
+    const at = values[r][iAt];
+    if (!(at instanceof Date)) continue;
+    const key = [
+      values[r][iKind], values[r][iMed] || "", iTim >= 0 ? values[r][iTim] || "" : "",
+      values[r][iBri] || "", Utilities.formatDate(at, TZ, "yyyy-MM-dd HH:mm"),
+    ].join("|");
+    if (seen[key]) {
+      toDelete.push({
+        row: r + 1,
+        label: Utilities.formatDate(at, TZ, "M/d HH:mm") + " " + values[r][iKind] + " " +
+               (values[r][iMed] || (values[r][iBri] ? "ブリストル" + values[r][iBri] : "")),
+      });
+    } else {
+      seen[key] = true;
+    }
+  }
+
+  const ui = SpreadsheetApp.getUi();
+  if (!toDelete.length) {
+    ui.alert("重複記録は見つかりませんでした。");
+    return;
+  }
+  const list = toDelete.map(function (d) { return "・" + d.label; }).join("\n");
+  const res = ui.alert(
+    "重複記録の削除",
+    toDelete.length + "件の重複が見つかりました。最初の1件を残して削除します。\n\n" + list + "\n\n削除してよいですか？",
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res !== ui.Button.OK) return;
+  // 下の行から消す（行番号がずれないように）
+  toDelete.reverse().forEach(function (d) { sh.deleteRow(d.row); });
+  ui.alert(toDelete.length + "件を削除しました。\n「ダッシュボードを今すぐ更新」を実行すると分析に反映されます。");
 }
 
 /* =========================================================
@@ -157,8 +275,9 @@ function applyRxUpdate20260731() {
     for (let r = 2; r <= rows.length + 1; r++) {
       rx.getRange(r, 10).setFormula('=IF(AND(G' + r + '<>"",H' + r + '<>""),G' + r + '+H' + r + '-1,"")');
     }
-    rx.getRange(2, 7, rows.length, 4).setNumberFormat("yyyy-mm-dd");
-    rx.getRange(2, 10, rows.length, 1).setNumberFormat("yyyy-mm-dd");
+    rx.getRange(2, 7, rows.length, 1).setNumberFormat("yyyy-mm-dd"); // 開始日
+    rx.getRange(2, 8, rows.length, 1).setNumberFormat("0");          // 日数（数値のまま）
+    rx.getRange(2, 10, rows.length, 1).setNumberFormat("yyyy-mm-dd"); // 終了日
     done.push("「処方」シートを作成（現行4剤＋旧処方4件）");
   }
 
@@ -257,6 +376,15 @@ function applyRxUpdate20260731() {
   );
 }
 
+// 「日数」セルの値を数値として読む。
+// セルが誤って日付書式になっていた場合（例: 28 → 1900-01-27）もシリアル値に戻して読む
+function readDayCount_(v) {
+  if (v instanceof Date) {
+    return Math.round((v - new Date(1899, 11, 30)) / 86400000) || null;
+  }
+  return Number(v) || null;
+}
+
 // シートの1行目に指定の見出しがなければ末尾に追加する。追加したらtrue
 function ensureHeader_(sh, name) {
   const lastCol = Math.max(sh.getLastColumn(), 1);
@@ -306,7 +434,7 @@ function doPost(e) {
       });
     }
     if (body.type === "event") {
-      appendEvent_(body.data);
+      appendEvent_(body.data, body.clientId);
     } else if (body.type === "daily") {
       upsertDaily_(body.data);
     } else if (body.type === "deleteMedToday") {
@@ -326,8 +454,36 @@ function doPost(e) {
 
 // イベント（排便・服薬）を1行追記
 // ※列の並びが変わっても壊れないよう、見出し名に合わせて書き込む
-function appendEvent_(d) {
+// ※二重送信対策: 同じクライアントID、または直近に同一内容（発生時刻が1分以内）の
+//   行がすでにある場合は追記せずスキップする
+function appendEvent_(d, clientId) {
   const sh = mustSheet_(SHEET_EVENT);
+  const newAt = d.occurredAt ? new Date(d.occurredAt) : new Date();
+
+  // 直近50行と照合して重複を弾く
+  const last = sh.getLastRow();
+  if (last >= 2) {
+    const from = Math.max(2, last - 49);
+    const values = sh.getRange(from, 1, last - from + 1, sh.getLastColumn()).getValues();
+    const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+    const iKind = head.indexOf("種別"), iAt = head.indexOf("発生時刻"),
+          iBri = head.indexOf("ブリストルスケール"), iMed = head.indexOf("薬名"),
+          iTim = head.indexOf("タイミング"), iCid = head.indexOf("クライアントID");
+    for (let r = 0; r < values.length; r++) {
+      // 再送による重複（同じクライアントID）
+      if (iCid >= 0 && clientId && String(values[r][iCid]) === String(clientId)) return;
+      // 二度押しによる重複（同一内容かつ発生時刻が1分以内）
+      const at = values[r][iAt];
+      if (!(at instanceof Date)) continue;
+      const same =
+        String(values[r][iKind]) === String(d.kind || "") &&
+        String(values[r][iMed] || "") === String(d.med || "") &&
+        (iTim < 0 || String(values[r][iTim] || "") === String(d.timing || "")) &&
+        String(values[r][iBri] || "") === String(d.bristol || "");
+      if (same && Math.abs(at - newAt) < 60 * 1000) return;
+    }
+  }
+
   const map = {
     "記録日時": new Date(), // サーバー側で自動付与
     "種別": d.kind || "",
@@ -338,6 +494,7 @@ function appendEvent_(d) {
     "薬名": d.med || "",
     "タイミング": d.timing || "",
     "メモ": d.memo || "",
+    "クライアントID": clientId || "",
   };
   const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   sh.appendRow(head.map(function (h) { return h in map ? map[h] : ""; }));
@@ -378,20 +535,74 @@ function upsertDaily_(d) {
     "メンタルメモ": d.mentalMemo || "",
     "メモ": d.memo || "",
     "観察タグ": (d.obsTags || []).join(","),
+    "満腹度": d.fullness || "",
   };
   const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const row = head.map(function (h) { return h in map ? map[h] : ""; });
   const last = sh.getLastRow();
+  let written = false;
   if (last >= 2) {
     const dates = sh.getRange(2, 1, last - 1, 1).getValues();
     for (let i = 0; i < dates.length; i++) {
       if (fmtDate_(dates[i][0]) === String(d.date)) {
         sh.getRange(i + 2, 1, 1, row.length).setValues([row]);
-        return;
+        written = true;
+        break;
       }
     }
   }
-  sh.appendRow(row);
+  if (!written) sh.appendRow(row);
+
+  // 生理開始のトグルを周期ログに反映（trueで登録・falseでその日の行を削除）
+  if (typeof d.periodStart === "boolean") {
+    updatePeriodLog_(map["日付"], d.periodStart);
+  }
+}
+
+// 周期ログに「開始日」を登録/解除する
+function updatePeriodLog_(dateKey, isStart) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_PERIOD);
+  if (!sh) return; // シート未作成なら何もしない（アップデート未適用時）
+  const last = sh.getLastRow();
+  let foundRow = -1;
+  if (last >= 2) {
+    const dates = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (let i = 0; i < dates.length; i++) {
+      if (dates[i][0] instanceof Date && fmtDate_(dates[i][0]) === String(dateKey)) {
+        foundRow = i + 2;
+        break;
+      }
+    }
+  }
+  if (isStart && foundRow < 0) {
+    sh.appendRow([parseDate_(dateKey), "アプリから登録"]);
+  } else if (!isStart && foundRow >= 0) {
+    sh.deleteRow(foundRow);
+  }
+}
+
+// 周期ログの開始日一覧（日付キーの昇順）
+function readCycleStarts_() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_PERIOD);
+  if (!sh) return [];
+  const values = sh.getDataRange().getValues();
+  const out = [];
+  for (let r = 1; r < values.length; r++) {
+    if (values[r][0] instanceof Date) out.push(fmtDate_(values[r][0]));
+  }
+  out.sort();
+  return out;
+}
+
+// その日が周期何日目か（直近の開始日から数えて1日目〜。開始日がなければnull、45日超は打ち切り）
+function cycleDayFor_(dateKey, starts) {
+  let latest = null;
+  for (let i = 0; i < starts.length; i++) {
+    if (starts[i] <= dateKey) latest = starts[i];
+  }
+  if (!latest) return null;
+  const diff = Math.round((parseDate_(dateKey) - parseDate_(latest)) / 86400000) + 1;
+  return diff <= 45 ? diff : null;
 }
 
 // 今日の服薬チェックを1件取り消す（薬名とタイミングが一致する今日の行を削除）
@@ -554,7 +765,7 @@ function readRx_() {
       timings: String(get(values[r], "タイミング") || "").split(",").map(function (s) { return s.trim(); }).filter(String),
       dose: String(get(values[r], "1回量") || ""),
       start: get(values[r], "開始日") instanceof Date ? get(values[r], "開始日") : null,
-      days: Number(get(values[r], "日数")) || null,
+      days: readDayCount_(get(values[r], "日数")),
       qty: String(get(values[r], "数量") || ""),
       note: String(get(values[r], "服用メモ") || ""),
       order: Number(get(values[r], "表示順")) || 999,
@@ -672,6 +883,7 @@ function readDaily_() {
       obsTags: idx["観察タグ"] >= 0
         ? String(values[r][idx["観察タグ"]] || "").split(",").map((s) => s.trim()).filter(String)
         : [],
+      fullness: idx["満腹度"] >= 0 ? String(values[r][idx["満腹度"]] || "") : "",
     };
   }
   return byDate;
@@ -688,6 +900,10 @@ function buildDashboard() {
   // すべての分析の土台になる「日別ステート」を先に計算
   const states = computeDailyStates_(events, daily, cfg);
 
+  // 生理周期の「周期何日目か」を各日に付与（周期ログ未作成なら全てnull）
+  const cycleStarts = readCycleStarts_();
+  states.forEach(function (s) { s.cycleDay = cycleDayFor_(s.key, cycleStarts); });
+
   writeStateSheet_(states);
   buildWeekly_(states, events);
   buildTriggerAnalysis_(states, daily);
@@ -696,7 +912,83 @@ function buildDashboard() {
   buildMental_(states);
   buildRhythm_(events);
   buildRxProgress_(states, daily, events);
+  buildPeriodAnalysis_(states, cycleStarts);
   buildLegend_();
+}
+
+/* =========================================================
+   周期×体調（生理周期と症状の関係）
+   周期ログの開始日をもとに、周期のフェーズごとに症状を集計する。
+   体調変化が「周期由来」か「食事由来」かの切り分けに使う
+   ========================================================= */
+function buildPeriodAnalysis_(states, cycleStarts) {
+  if (!cycleStarts.length) return; // 周期ログ未作成・データなしなら何もしない
+  const sh = resetSheet_(SHEET_PERIOD_ANALYSIS);
+
+  sh.getRange(1, 1).setValue("生理周期×体調").setFontWeight("bold").setFontSize(13);
+  sh.getRange(2, 1).setValue("記録済みの開始日: " + cycleStarts.join("、"));
+
+  // 平均周期長（開始日が2回以上あれば計算できる）
+  if (cycleStarts.length >= 2) {
+    const gaps = [];
+    for (let i = 1; i < cycleStarts.length; i++) {
+      gaps.push(Math.round((parseDate_(cycleStarts[i]) - parseDate_(cycleStarts[i - 1])) / 86400000));
+    }
+    const avg = Math.round(gaps.reduce(function (a, b) { return a + b; }, 0) / gaps.length);
+    sh.getRange(3, 1).setValue("平均周期: " + avg + "日（記録" + cycleStarts.length + "回）");
+  } else {
+    sh.getRange(3, 1).setValue("開始日が2回以上たまると平均周期が計算されます");
+  }
+
+  // フェーズ別の集計（日数区分は一般的な目安）
+  const phases = [
+    { label: "月経期（1〜5日目）", from: 1, to: 5 },
+    { label: "卵胞期（6〜13日目）", from: 6, to: 13 },
+    { label: "排卵期（14〜16日目）", from: 14, to: 16 },
+    { label: "黄体期（17日目〜）", from: 17, to: 45 },
+  ];
+  const head = ["フェーズ", "日数", "排便回数/日", "平均ブリストル", "腹痛日率(%)", "下痢日率(%)", "便秘日率(%)", "平均気分", "平均ストレス"];
+  sh.getRange(5, 1, 1, head.length).setValues([head]).setFontWeight("bold").setBackground("#e5e7eb");
+
+  const rows = phases.map(function (ph) {
+    const days = states.filter(function (s) { return s.cycleDay != null && s.cycleDay >= ph.from && s.cycleDay <= ph.to; });
+    if (!days.length) return [ph.label, 0, "", "", "", "", "", "", ""];
+    let stool = 0, bSum = 0, bN = 0, pain = 0, dia = 0, cons = 0, moodSum = 0, moodN = 0, strSum = 0, strN = 0;
+    days.forEach(function (s) {
+      stool += s.stoolCount;
+      if (s.avgBristol != null) { bSum += s.avgBristol; bN++; }
+      if (s.pain) pain++;
+      if (s.state === "下痢日") dia++;
+      if (s.state === "便秘日") cons++;
+      if (s.mood != null) { moodSum += s.mood; moodN++; }
+      if (s.stress != null) { strSum += s.stress; strN++; }
+    });
+    const n = days.length;
+    return [
+      ph.label, n,
+      Math.round((stool / n) * 100) / 100,
+      bN ? Math.round((bSum / bN) * 10) / 10 : "",
+      Math.round((pain / n) * 100),
+      Math.round((dia / n) * 100),
+      Math.round((cons / n) * 100),
+      moodN ? Math.round((moodSum / moodN) * 10) / 10 : "",
+      strN ? Math.round((strSum / strN) * 10) / 10 : "",
+    ];
+  });
+  sh.getRange(6, 1, rows.length, head.length).setValues(rows);
+  sh.getRange(11, 1).setValue("※ フェーズの日数区分は一般的な目安です。データがたまるほど傾向が見えてきます").setFontSize(9);
+
+  if (states.filter(function (s) { return s.cycleDay != null; }).length < 5) return;
+  sh.insertChart(
+    sh.newChart().setChartType(Charts.ChartType.COLUMN)
+      .addRange(sh.getRange(5, 1, rows.length + 1, 1))
+      .addRange(sh.getRange(5, 4, rows.length + 1, 1))
+      .addRange(sh.getRange(5, 5, rows.length + 1, 1))
+      .setPosition(13, 1, 0, 0)
+      .setOption("title", "周期フェーズ別の平均ブリストルと腹痛日率")
+      .setOption("height", 300).setOption("width", 560)
+      .build()
+  );
 }
 
 /* =========================================================
@@ -727,6 +1019,8 @@ function buildLegend_() {
     ["メンタル×体調", "気分・ストレス・睡眠と、同日/翌日の症状の関係"],
     ["排便リズム", "排便が多い時間帯・曜日"],
     ["処方経過", "受診報告用。薬の服用と排便の変化を日付で並べた表（青い行＝処方開始日）"],
+    ["周期ログ", "生理の開始日（アプリの🩸ボタンか、このシートへの入力で記録）"],
+    ["周期×体調", "生理周期のフェーズ別に症状を集計。周期由来か食事由来かの切り分け用"],
   ];
   sh.getRange(r, 1, guide.length, 2).setValues(guide);
   sh.getRange(r, 1, 1, 2).setFontWeight("bold").setBackground("#e5e7eb");
@@ -973,11 +1267,11 @@ function computeDailyStates_(events, daily, cfg) {
 function writeStateSheet_(states) {
   const sh = resetSheet_(SHEET_STATE);
   const head = ["日付", "曜日", "排便回数", "平均ブリストル", "最大ブリストル", "腹痛あり", "服薬回数",
-                "ステート", "便秘連続日数", "サイクル番号", "サイクル内腹痛までの便秘日数", "気分", "ストレス", "睡眠時間"];
+                "ステート", "便秘連続日数", "サイクル番号", "サイクル内腹痛までの便秘日数", "気分", "ストレス", "睡眠時間", "周期日数"];
   const rows = states.map((s) => [
     s.date, s.weekday, s.stoolCount, orBlank_(s.avgBristol), orBlank_(s.maxBristol),
     s.pain ? "あり" : "", s.medCount, s.state, s.streak, orBlank_(s.cycle), orBlank_(s.painAfterDays),
-    orBlank_(s.mood), orBlank_(s.stress), orBlank_(s.sleep),
+    orBlank_(s.mood), orBlank_(s.stress), orBlank_(s.sleep), orBlank_(s.cycleDay),
   ]);
   sh.getRange(1, 1, 1, head.length).setValues([head]).setFontWeight("bold");
   if (rows.length) {
@@ -1097,6 +1391,39 @@ function buildTriggerAnalysis_(states, daily) {
   });
   sh.setConditionalFormatRules(rules);
   sh.getRange("A" + (rows.length + 3)).setValue("※ 該当日数が少ないタグは参考程度に見てください（偶然の影響が大きいため）");
+
+  // --- 満腹度別の症状比較 ---
+  let fr = rows.length + 5;
+  sh.getRange(fr, 1).setValue("満腹度別の症状").setFontWeight("bold");
+  fr += 1;
+  const fHead = ["満腹度", "該当日数", "同日の平均ブリストル", "同日の腹痛率(%)", "翌日の平均ブリストル", "翌日の腹痛率(%)"];
+  sh.getRange(fr, 1, 1, fHead.length).setValues([fHead]).setFontWeight("bold");
+  const fRows = FULLNESS_OPTIONS.map(function (opt) {
+    const keys = Object.keys(daily).filter(function (k) { return daily[k].fullness === opt; });
+    let n = 0, sB = 0, sBn = 0, sPain = 0, nB = 0, nBn = 0, nPain = 0, nN = 0;
+    keys.forEach(function (k) {
+      const s = stateByKey[k];
+      if (s) {
+        n++;
+        if (s.avgBristol != null) { sB += s.avgBristol; sBn++; }
+        if (s.pain) sPain++;
+      }
+      const nx = nextDayOf(k);
+      if (nx) {
+        nN++;
+        if (nx.avgBristol != null) { nB += nx.avgBristol; nBn++; }
+        if (nx.pain) nPain++;
+      }
+    });
+    return [
+      opt, keys.length,
+      sBn ? Math.round((sB / sBn) * 10) / 10 : "",
+      n ? Math.round((sPain / n) * 100) : "",
+      nBn ? Math.round((nB / nBn) * 10) / 10 : "",
+      nN ? Math.round((nPain / nN) * 100) : "",
+    ];
+  });
+  sh.getRange(fr + 1, 1, fRows.length, fHead.length).setValues(fRows);
 }
 
 // 指定した日付リストの「翌日」の症状をまとめて集計する共通処理

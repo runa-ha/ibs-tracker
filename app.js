@@ -28,6 +28,7 @@ const PAIN_OPTIONS = ["なし", "軽い", "中", "強い"];
 const ZANBEN_OPTIONS = ["なし", "あり"];
 const EXERCISE_OPTIONS = ["なし", "軽い", "しっかり"];
 const MOOD_EMOJI = ["😞", "😕", "😐", "🙂", "😄"];
+const FULLNESS_OPTIONS = ["食べすぎて気持ち悪い", "胃もたれ", "ちょうどよく満腹", "八分目", "足りない"];
 
 // 服薬チェックのタイミング表示順（GAS側のTIMING_ORDERと合わせる）
 const TIMING_ORDER = ["朝食後", "昼食後", "夕食前", "夕食後", "外用"];
@@ -46,6 +47,9 @@ let waterMl = 0;
 let selectedExercise = null;
 let selectedMood = null;
 let selectedStress = null;
+let selectedFullness = null;
+let periodStart = false; // 今日が生理開始日か
+const medTapGuard = {};  // 服薬チェックの二度押しガード
 // 食事タグは朝・昼・夕で別々に持つ
 let mealTags = { morning: new Set(), noon: new Set(), evening: new Set() };
 let selectedObsTags = new Set();
@@ -109,6 +113,8 @@ function saveDraft() {
     exercise: selectedExercise,
     mood: selectedMood,
     stress: selectedStress,
+    fullness: selectedFullness,
+    periodStart: periodStart,
     obsTags: Array.from(selectedObsTags),
     meals: {
       morning: { tags: Array.from(mealTags.morning), memo: $("meal-memo-morning").value.trim() },
@@ -150,6 +156,8 @@ function sendDaily() {
       exercise: draft.exercise || "",
       mood: draft.mood || "",
       stress: draft.stress || "",
+      fullness: draft.fullness || "",
+      periodStart: !!draft.periodStart,
       obsTags: draft.obsTags || [],
       mentalMemo: draft.mentalMemo || "",
       memo: draft.memo || "",
@@ -448,6 +456,12 @@ function renderChecklist() {
 }
 
 function toggleMedCheck(p, slot) {
+  // 二度押しガード: 同じボタンの連続タップは2秒間無視する
+  const guardKey = p.name + "|" + slot;
+  const now = Date.now();
+  if (medTapGuard[guardKey] && now - medTapGuard[guardKey] < 2000) return;
+  medTapGuard[guardKey] = now;
+
   if (isMedChecked(p.name, slot)) {
     // チェック済み → 取り消し（今日の該当行をシートから削除。オンライン時のみ）
     if (!confirm("「" + p.name + "（" + slot + "）」の今日の記録を取り消しますか？")) return;
@@ -522,13 +536,47 @@ function buildBristolButtons() {
 
 // ---------- 送信処理 ----------
 
+// ボタンを数秒間押せなくする（連打による二重送信の防止）
+function lockBtn(id, ms) {
+  const el = $(id);
+  if (!el) return;
+  el.disabled = true;
+  setTimeout(() => { el.disabled = false; }, ms || 3000);
+}
+
+// 直近10分以内に同じ内容の記録がないかを調べる（送信済み＋送信待ちの両方）
+function hasRecentSame(kind, med, occurredAtIso) {
+  const t = new Date(occurredAtIso).getTime();
+  const win = 10 * 60 * 1000;
+  const p = todayString().split("-");
+  for (const ev of todayEvents) {
+    if (ev.kind !== kind) continue;
+    if (kind === "服薬" && ev.med !== med) continue;
+    const hm = String(ev.time || "").split(":");
+    const d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]), Number(hm[0]) || 0, Number(hm[1]) || 0);
+    if (Math.abs(d.getTime() - t) <= win) return true;
+  }
+  for (const qi of loadQueue()) {
+    if (qi.type !== "event" || !qi.data || qi.data.kind !== kind) continue;
+    if (kind === "服薬" && qi.data.med !== med) continue;
+    if (Math.abs(new Date(qi.data.occurredAt).getTime() - t) <= win) return true;
+  }
+  return false;
+}
+
 function submitStool() {
   if (!selectedBristol) { toast("ブリストルスケールを選んでください"); return; }
+  const iso = new Date($("stool-time").value || Date.now()).toISOString();
+  if (hasRecentSame("排便", null, iso) &&
+      !confirm("⚠️ 10分以内に排便の記録がすでにあります。\n重複ではありませんか？\n\nOK＝このまま記録する ／ キャンセル＝やめる")) {
+    return;
+  }
+  lockBtn("submit-stool");
   submitPayload({
     type: "event",
     data: {
       kind: "排便",
-      occurredAt: new Date($("stool-time").value || Date.now()).toISOString(),
+      occurredAt: iso,
       bristol: selectedBristol,
       pain: selectedPain,
       zanben: selectedZanben,
@@ -552,11 +600,17 @@ function submitStool() {
 
 function submitMed() {
   if (!selectedMed) { toast("薬を選んでください"); return; }
+  const iso = new Date($("med-time").value || Date.now()).toISOString();
+  if (hasRecentSame("服薬", selectedMed, iso) &&
+      !confirm("⚠️ 10分以内に「" + selectedMed + "」の記録がすでにあります。\n重複ではありませんか？\n\nOK＝このまま記録する ／ キャンセル＝やめる")) {
+    return;
+  }
+  lockBtn("submit-med");
   submitPayload({
     type: "event",
     data: {
       kind: "服薬",
-      occurredAt: new Date($("med-time").value || Date.now()).toISOString(),
+      occurredAt: iso,
       med: selectedMed,
       memo: $("med-memo").value.trim(),
     },
@@ -619,6 +673,8 @@ function init() {
     selectedExercise = draft.exercise || null;
     selectedMood = draft.mood || null;
     selectedStress = draft.stress || null;
+    selectedFullness = draft.fullness || null;
+    periodStart = !!draft.periodStart;
     selectedObsTags = new Set(draft.obsTags || []);
     const meals = draft.meals || {};
     ["morning", "noon", "evening"].forEach((k) => {
@@ -645,9 +701,21 @@ function init() {
   buildSeg("exercise-seg", EXERCISE_OPTIONS, (v) => { selectedExercise = v; saveDraft(); });
   buildSeg("mood-seg", [1, 2, 3, 4, 5], (v) => { selectedMood = v; saveDraft(); }, MOOD_EMOJI);
   buildSeg("stress-seg", [1, 2, 3, 4, 5], (v) => { selectedStress = v; saveDraft(); });
+  buildSeg("fullness-seg", FULLNESS_OPTIONS, (v) => { selectedFullness = v; saveDraft(); });
   selectByVal("exercise-seg", selectedExercise);
   selectByVal("mood-seg", selectedMood);
   selectByVal("stress-seg", selectedStress);
+  selectByVal("fullness-seg", selectedFullness);
+
+  // 生理開始日のトグル
+  const periodChip = $("period-chip");
+  periodChip.classList.toggle("selected", periodStart);
+  periodChip.onclick = () => {
+    periodStart = !periodStart;
+    periodChip.classList.toggle("selected", periodStart);
+    toast(periodStart ? "🩸 今日を生理開始日として記録します" : "生理開始の記録を取り消しました");
+    saveDraft();
+  };
 
   // メモ類は入力が止まったら自動保存
   ["meal-memo-morning", "meal-memo-noon", "meal-memo-evening", "mental-memo", "daily-memo"].forEach((id) => {

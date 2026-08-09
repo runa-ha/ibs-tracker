@@ -122,6 +122,7 @@ h2 { font-size: 1rem; margin: 18px 0 8px; color: var(--accent-dark); }
 .group-label { font-size: 0.8rem; color: var(--text-sub); font-weight: 600; margin: 12px 0 6px; }
 
 .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+.seg.seg-col { flex-direction: column; } /* 満腹度など文言が長い選択肢用（縦並び） */
 .seg button {
   flex: 1; min-width: 60px; min-height: 48px; padding: 10px 6px;
   background: var(--card); border: 2px solid var(--border); border-radius: 12px;
