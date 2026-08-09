@@ -34,7 +34,8 @@ const FULLNESS_OPTIONS = ["食べすぎて気持ち悪い", "胃もたれ", "ち
 
 const EVENT_HEADERS = ["記録日時", "種別", "発生時刻", "ブリストルスケール", "腹痛", "残便感", "薬名", "タイミング", "メモ"];
 const DAILY_HEADERS = ["日付", "睡眠時間", "食事タグ", "食事メモ", "水分量", "運動", "気分", "ストレス", "メンタルメモ", "メモ", "観察タグ",
-                       "朝食タグ", "朝食メモ", "昼食タグ", "昼食メモ", "夕食タグ", "夕食メモ", "満腹度"];
+                       "朝食タグ", "朝食メモ", "昼食タグ", "昼食メモ", "夕食タグ", "夕食メモ", "満腹度",
+                       "朝食満腹度", "昼食満腹度", "夕食満腹度"];
 const RX_HEADERS = ["薬名", "状態", "分類", "用法", "タイミング", "1回量", "開始日", "日数", "数量", "終了日", "服用メモ", "表示順"];
 
 // 服薬チェックのタイミング表示順
@@ -129,7 +130,9 @@ function applyUpdate20260810() {
   const done = [];
 
   // 1) 列の追加
-  if (ensureHeader_(mustSheet_(SHEET_DAILY), "満腹度")) done.push("デイリーログに「満腹度」列を追加");
+  ["満腹度", "朝食満腹度", "昼食満腹度", "夕食満腹度"].forEach(function (h) {
+    if (ensureHeader_(mustSheet_(SHEET_DAILY), h)) done.push("デイリーログに「" + h + "」列を追加");
+  });
   if (ensureHeader_(mustSheet_(SHEET_EVENT), "クライアントID")) done.push("イベントログに「クライアントID」列を追加（二重送信防止用）");
 
   // 2) 周期ログシート（生理周期の開始日を記録する）
@@ -535,7 +538,11 @@ function upsertDaily_(d) {
     "メンタルメモ": d.mentalMemo || "",
     "メモ": d.memo || "",
     "観察タグ": (d.obsTags || []).join(","),
-    "満腹度": d.fullness || "",
+    // 満腹度は食事ごとに記録。「満腹度」列にはまとめ（後方互換用）を書く
+    "朝食満腹度": meal("morning").fullness || "",
+    "昼食満腹度": meal("noon").fullness || "",
+    "夕食満腹度": meal("evening").fullness || "",
+    "満腹度": d.fullness || fullnessSummary_(meals),
   };
   const head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const row = head.map(function (h) { return h in map ? map[h] : ""; });
@@ -557,6 +564,15 @@ function upsertDaily_(d) {
   if (typeof d.periodStart === "boolean") {
     updatePeriodLog_(map["日付"], d.periodStart);
   }
+}
+
+// 「満腹度」列に書くまとめ文字列（例: 朝:八分目 ／ 夕:食べすぎて気持ち悪い）
+function fullnessSummary_(meals) {
+  const parts = [];
+  if (meals.morning && meals.morning.fullness) parts.push("朝:" + meals.morning.fullness);
+  if (meals.noon && meals.noon.fullness) parts.push("昼:" + meals.noon.fullness);
+  if (meals.evening && meals.evening.fullness) parts.push("夕:" + meals.evening.fullness);
+  return parts.join(" ／ ");
 }
 
 // 周期ログに「開始日」を登録/解除する
@@ -883,7 +899,10 @@ function readDaily_() {
       obsTags: idx["観察タグ"] >= 0
         ? String(values[r][idx["観察タグ"]] || "").split(",").map((s) => s.trim()).filter(String)
         : [],
-      fullness: idx["満腹度"] >= 0 ? String(values[r][idx["満腹度"]] || "") : "",
+      // その日の満腹度一覧（朝昼夕の各列＋旧形式の「満腹度」列を合わせて読む）
+      fullnessList: ["朝食満腹度", "昼食満腹度", "夕食満腹度", "満腹度"]
+        .map((h) => (idx[h] >= 0 ? String(values[r][idx[h]] || "").trim() : ""))
+        .filter((v) => FULLNESS_OPTIONS.indexOf(v) >= 0),
     };
   }
   return byDate;
@@ -1392,14 +1411,14 @@ function buildTriggerAnalysis_(states, daily) {
   sh.setConditionalFormatRules(rules);
   sh.getRange("A" + (rows.length + 3)).setValue("※ 該当日数が少ないタグは参考程度に見てください（偶然の影響が大きいため）");
 
-  // --- 満腹度別の症状比較 ---
+  // --- 満腹度別の症状比較（いずれかの食事で該当した日を集計） ---
   let fr = rows.length + 5;
-  sh.getRange(fr, 1).setValue("満腹度別の症状").setFontWeight("bold");
+  sh.getRange(fr, 1).setValue("満腹度別の症状（いずれかの食事で該当した日）").setFontWeight("bold");
   fr += 1;
   const fHead = ["満腹度", "該当日数", "同日の平均ブリストル", "同日の腹痛率(%)", "翌日の平均ブリストル", "翌日の腹痛率(%)"];
   sh.getRange(fr, 1, 1, fHead.length).setValues([fHead]).setFontWeight("bold");
   const fRows = FULLNESS_OPTIONS.map(function (opt) {
-    const keys = Object.keys(daily).filter(function (k) { return daily[k].fullness === opt; });
+    const keys = Object.keys(daily).filter(function (k) { return (daily[k].fullnessList || []).indexOf(opt) >= 0; });
     let n = 0, sB = 0, sBn = 0, sPain = 0, nB = 0, nBn = 0, nPain = 0, nN = 0;
     keys.forEach(function (k) {
       const s = stateByKey[k];

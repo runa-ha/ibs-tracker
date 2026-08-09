@@ -122,7 +122,16 @@ h2 { font-size: 1rem; margin: 18px 0 8px; color: var(--accent-dark); }
 .group-label { font-size: 0.8rem; color: var(--text-sub); font-weight: 600; margin: 12px 0 6px; }
 
 .seg { display: flex; gap: 6px; flex-wrap: wrap; }
-.seg.seg-col { flex-direction: column; } /* 満腹度など文言が長い選択肢用（縦並び） */
+
+/* 食事ごとの満腹度（1行のコンパクト表示） */
+.fullness-row { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
+.fullness-label { flex-shrink: 0; font-size: 0.68rem; color: var(--text-sub); font-weight: 600; margin-right: 2px; }
+.fullness-btn {
+  flex: 1; min-height: 40px; padding: 4px 2px;
+  font-size: 0.72rem; font-weight: 600; color: var(--text-sub);
+  background: var(--card); border: 1.5px solid var(--border); border-radius: 10px;
+}
+.fullness-btn.selected { border-color: var(--accent); background: #ecfdf5; color: var(--accent-dark); font-weight: 700; }
 .seg button {
   flex: 1; min-width: 60px; min-height: 48px; padding: 10px 6px;
   background: var(--card); border: 2px solid var(--border); border-radius: 12px;

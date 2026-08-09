@@ -28,7 +28,14 @@ const PAIN_OPTIONS = ["なし", "軽い", "中", "強い"];
 const ZANBEN_OPTIONS = ["なし", "あり"];
 const EXERCISE_OPTIONS = ["なし", "軽い", "しっかり"];
 const MOOD_EMOJI = ["😞", "😕", "😐", "🙂", "😄"];
-const FULLNESS_OPTIONS = ["食べすぎて気持ち悪い", "胃もたれ", "ちょうどよく満腹", "八分目", "足りない"];
+// 満腹度: ボタンは短い表示、記録はフルの文言（少ない→多いの順）
+const FULLNESS_LEVELS = [
+  { short: "足りない", full: "足りない" },
+  { short: "八分目", full: "八分目" },
+  { short: "ちょうど", full: "ちょうどよく満腹" },
+  { short: "胃もたれ", full: "胃もたれ" },
+  { short: "食べすぎ", full: "食べすぎて気持ち悪い" },
+];
 
 // 服薬チェックのタイミング表示順（GAS側のTIMING_ORDERと合わせる）
 const TIMING_ORDER = ["朝食後", "昼食後", "夕食前", "夕食後", "外用"];
@@ -47,7 +54,7 @@ let waterMl = 0;
 let selectedExercise = null;
 let selectedMood = null;
 let selectedStress = null;
-let selectedFullness = null;
+let mealFullness = { morning: null, noon: null, evening: null }; // 食事ごとの満腹度
 let periodStart = false; // 今日が生理開始日か
 const medTapGuard = {};  // 服薬チェックの二度押しガード
 // 食事タグは朝・昼・夕で別々に持つ
@@ -113,19 +120,24 @@ function saveDraft() {
     exercise: selectedExercise,
     mood: selectedMood,
     stress: selectedStress,
-    fullness: selectedFullness,
     periodStart: periodStart,
     obsTags: Array.from(selectedObsTags),
     meals: {
-      morning: { tags: Array.from(mealTags.morning), memo: $("meal-memo-morning").value.trim() },
-      noon: { tags: Array.from(mealTags.noon), memo: $("meal-memo-noon").value.trim() },
-      evening: { tags: Array.from(mealTags.evening), memo: $("meal-memo-evening").value.trim() },
+      morning: { tags: Array.from(mealTags.morning), memo: memoValue_("meal-memo-morning"), fullness: mealFullness.morning },
+      noon: { tags: Array.from(mealTags.noon), memo: memoValue_("meal-memo-noon"), fullness: mealFullness.noon },
+      evening: { tags: Array.from(mealTags.evening), memo: memoValue_("meal-memo-evening"), fullness: mealFullness.evening },
     },
-    mentalMemo: $("mental-memo").value.trim(),
-    memo: $("daily-memo").value.trim(),
+    mentalMemo: memoValue_("mental-memo"),
+    memo: memoValue_("daily-memo"),
   };
   localStorage.setItem(LS_DAILY, JSON.stringify(draft));
   scheduleDailySend();
+}
+
+// 入力欄の値を安全に読む（要素が見つからなくてもエラーにしない）
+function memoValue_(id) {
+  const el = $(id);
+  return el ? el.value.trim() : "";
 }
 
 function loadDraft() {
@@ -156,7 +168,6 @@ function sendDaily() {
       exercise: draft.exercise || "",
       mood: draft.mood || "",
       stress: draft.stress || "",
-      fullness: draft.fullness || "",
       periodStart: !!draft.periodStart,
       obsTags: draft.obsTags || [],
       mentalMemo: draft.mentalMemo || "",
@@ -309,6 +320,7 @@ function renderSummary(s) {
 function renderMasters() {
   // 薬ボタン
   const medWrap = $("med-buttons");
+  if (!medWrap) return;
   medWrap.innerHTML = "";
   if (settings.medicines.length === 0) {
     medWrap.innerHTML = '<div class="loading-note">薬リストが未取得です（電波のある場所で開き直してください）</div>';
@@ -333,9 +345,29 @@ function renderMasters() {
   buildChips_("obs-chips", settings.obsTags || [], selectedObsTags, "アップデート適用後に表示されます", saveDraft);
 }
 
+// 食事ごとの満腹度ボタン（1行のコンパクト表示。再タップで解除）
+function buildFullnessRow(mealKey) {
+  const wrap = $("fullness-" + mealKey);
+  if (!wrap) return;
+  wrap.querySelectorAll("button").forEach((b) => b.remove());
+  FULLNESS_LEVELS.forEach((lv) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "fullness-btn" + (mealFullness[mealKey] === lv.full ? " selected" : "");
+    b.textContent = lv.short;
+    b.onclick = () => {
+      mealFullness[mealKey] = mealFullness[mealKey] === lv.full ? null : lv.full;
+      buildFullnessRow(mealKey);
+      saveDraft();
+    };
+    wrap.appendChild(b);
+  });
+}
+
 // タグ選択チップを作る共通処理
 function buildChips_(containerId, names, selectedSet, emptyMsg, onToggle) {
   const wrap = $(containerId);
+  if (!wrap) return; // 画面部品がない場合でも起動処理を止めない
   wrap.innerHTML = "";
   if (!names.length) {
     wrap.innerHTML = '<div class="loading-note">' + emptyMsg + "</div>";
@@ -495,6 +527,7 @@ function toggleMedCheck(p, slot) {
 // 固定選択肢のボタン群を作る（汎用）
 function buildSeg(containerId, options, onSelect, labels) {
   const wrap = $(containerId);
+  if (!wrap) return; // 画面部品がない場合でも起動処理を止めない
   wrap.innerHTML = "";
   options.forEach((opt, i) => {
     const b = document.createElement("button");
@@ -510,7 +543,7 @@ function buildSeg(containerId, options, onSelect, labels) {
 
 // 保存されている値からボタンの選択状態を復元する
 function selectByVal(containerId, val) {
-  if (val == null || val === "") return;
+  if (val == null || val === "" || !$(containerId)) return;
   $(containerId).querySelectorAll("button").forEach((b) => {
     b.classList.toggle("selected", b.dataset.val === String(val));
   });
@@ -649,6 +682,8 @@ function init() {
   });
 
   // 記録タブの部品
+  // ※画面と動作の新旧が一瞬混ざっても全体が止まらないよう、ブロックごとに保護する
+  try {
   buildBristolButtons();
   buildSeg("pain-seg", PAIN_OPTIONS, (v) => (selectedPain = v));
   selectDefault("pain-seg", "なし");
@@ -660,10 +695,14 @@ function init() {
   $("med-time-now").onclick = () => ($("med-time").value = nowLocalString());
   $("submit-stool").onclick = submitStool;
   $("submit-med").onclick = submitMed;
+  } catch (e) { console.warn("記録タブの初期化で問題:", e); }
 
   // 今日タブの部品
+  try {
   const d = new Date();
-  $("daily-date-label").textContent = (d.getMonth() + 1) + "/" + d.getDate() + "(" + ["日", "月", "火", "水", "木", "金", "土"][d.getDay()] + ")";
+  if ($("daily-date-label")) {
+    $("daily-date-label").textContent = (d.getMonth() + 1) + "/" + d.getDate() + "(" + ["日", "月", "火", "水", "木", "金", "土"][d.getDay()] + ")";
+  }
 
   // 今日の下書きがあれば復元（アプリを閉じても丸一日残る）
   const draft = loadDraft();
@@ -673,23 +712,24 @@ function init() {
     selectedExercise = draft.exercise || null;
     selectedMood = draft.mood || null;
     selectedStress = draft.stress || null;
-    selectedFullness = draft.fullness || null;
     periodStart = !!draft.periodStart;
     selectedObsTags = new Set(draft.obsTags || []);
     const meals = draft.meals || {};
     ["morning", "noon", "evening"].forEach((k) => {
       mealTags[k] = new Set((meals[k] && meals[k].tags) || []);
-      $("meal-memo-" + k).value = (meals[k] && meals[k].memo) || "";
+      mealFullness[k] = (meals[k] && meals[k].fullness) || null;
+      const memoEl = $("meal-memo-" + k);
+      if (memoEl) memoEl.value = (meals[k] && meals[k].memo) || "";
     });
-    $("mental-memo").value = draft.mentalMemo || "";
-    $("daily-memo").value = draft.memo || "";
+    if ($("mental-memo")) $("mental-memo").value = draft.mentalMemo || "";
+    if ($("daily-memo")) $("daily-memo").value = draft.memo || "";
     updateSaveStatus("☁️ 下書きを復元しました（自動保存は有効です）");
   }
 
-  const updateSleepView = () => { $("sleep-value").textContent = sleepHours.toFixed(1); };
+  const updateSleepView = () => { if ($("sleep-value")) $("sleep-value").textContent = sleepHours.toFixed(1); };
   const updateWaterView = () => {
-    $("water-value").textContent = waterMl;
-    $("water-cups").textContent = waterMl > 0 ? "（コップ約" + Math.round(waterMl / 250) + "杯）" : "";
+    if ($("water-value")) $("water-value").textContent = waterMl;
+    if ($("water-cups")) $("water-cups").textContent = waterMl > 0 ? "（コップ約" + Math.round(waterMl / 250) + "杯）" : "";
   };
   updateSleepView();
   updateWaterView();
@@ -701,26 +741,31 @@ function init() {
   buildSeg("exercise-seg", EXERCISE_OPTIONS, (v) => { selectedExercise = v; saveDraft(); });
   buildSeg("mood-seg", [1, 2, 3, 4, 5], (v) => { selectedMood = v; saveDraft(); }, MOOD_EMOJI);
   buildSeg("stress-seg", [1, 2, 3, 4, 5], (v) => { selectedStress = v; saveDraft(); });
-  buildSeg("fullness-seg", FULLNESS_OPTIONS, (v) => { selectedFullness = v; saveDraft(); });
   selectByVal("exercise-seg", selectedExercise);
   selectByVal("mood-seg", selectedMood);
   selectByVal("stress-seg", selectedStress);
-  selectByVal("fullness-seg", selectedFullness);
+
+  // 食事ごとの満腹度ボタン
+  ["morning", "noon", "evening"].forEach(buildFullnessRow);
 
   // 生理開始日のトグル
   const periodChip = $("period-chip");
-  periodChip.classList.toggle("selected", periodStart);
-  periodChip.onclick = () => {
-    periodStart = !periodStart;
+  if (periodChip) {
     periodChip.classList.toggle("selected", periodStart);
-    toast(periodStart ? "🩸 今日を生理開始日として記録します" : "生理開始の記録を取り消しました");
-    saveDraft();
-  };
+    periodChip.onclick = () => {
+      periodStart = !periodStart;
+      periodChip.classList.toggle("selected", periodStart);
+      toast(periodStart ? "🩸 今日を生理開始日として記録します" : "生理開始の記録を取り消しました");
+      saveDraft();
+    };
+  }
 
   // メモ類は入力が止まったら自動保存
   ["meal-memo-morning", "meal-memo-noon", "meal-memo-evening", "mental-memo", "daily-memo"].forEach((id) => {
-    $(id).addEventListener("input", saveDraft);
+    const el = $(id);
+    if (el) el.addEventListener("input", saveDraft);
   });
+  } catch (e) { console.warn("今日タブの初期化で問題:", e); }
 
   // 合言葉の保存ボタン
   $("auth-save").onclick = () => {
