@@ -12,6 +12,8 @@ const LS_QUEUE = "ibs_queue";       // 未送信データの保存キー
 const LS_SETTINGS = "ibs_settings"; // 設定マスタのキャッシュキー
 const LS_AUTH = "ibs_auth";         // 合言葉の保存キー（この端末の中にだけ保存される）
 const LS_DAILY = "ibs_daily_draft"; // 今日タブの下書き（日付が変わると自動リセット）
+const LS_RECENT_MEDS = "ibs_recent_meds"; // 「その他」で入力した薬名の履歴（候補表示用）
+const OTHER_MED = "__other__"; // 「その他（名前を入力）」ボタンの内部値
 
 const BRISTOL = [
   { n: 1, name: "コロコロ便", desc: "硬くて木の実のような便" },
@@ -332,10 +334,33 @@ function renderMasters() {
     b.onclick = () => {
       selectedMed = name;
       medWrap.querySelectorAll(".med-btn").forEach((x) => x.classList.toggle("selected", x === b));
+      $("med-other-name").classList.add("hidden");
       $("med-detail").classList.remove("hidden");
     };
     medWrap.appendChild(b);
   });
+
+  // 「その他」ボタン: マスタにない薬を名前を打って記録する
+  const other = document.createElement("button");
+  other.className = "med-btn med-btn-other";
+  other.textContent = "✏️ その他（名前を入力）";
+  other.onclick = () => {
+    selectedMed = OTHER_MED;
+    medWrap.querySelectorAll(".med-btn").forEach((x) => x.classList.toggle("selected", x === other));
+    $("med-detail").classList.remove("hidden");
+    const input = $("med-other-name");
+    input.classList.remove("hidden");
+    // 最近入力した薬名を候補に出す
+    const list = $("med-other-list");
+    list.innerHTML = "";
+    loadRecentMeds().forEach((n) => {
+      const opt = document.createElement("option");
+      opt.value = n;
+      list.appendChild(opt);
+    });
+    input.focus();
+  };
+  medWrap.appendChild(other);
 
   // 食事タグ（朝・昼・夕それぞれ）
   buildChips_("tag-chips-morning", settings.tags, mealTags.morning, "タグが未取得です", saveDraft);
@@ -631,26 +656,44 @@ function submitStool() {
   $("stool-time").value = nowLocalString();
 }
 
+// 「その他」で入力した薬名の履歴（新しい順・最大8件）
+function loadRecentMeds() {
+  try { return JSON.parse(localStorage.getItem(LS_RECENT_MEDS)) || []; } catch (e) { return []; }
+}
+function rememberRecentMed(name) {
+  const list = [name].concat(loadRecentMeds().filter((n) => n !== name)).slice(0, 8);
+  localStorage.setItem(LS_RECENT_MEDS, JSON.stringify(list));
+}
+
 function submitMed() {
   if (!selectedMed) { toast("薬を選んでください"); return; }
+  // 「その他」の場合は入力欄の薬名を使う
+  let medName = selectedMed;
+  if (selectedMed === OTHER_MED) {
+    medName = $("med-other-name").value.trim();
+    if (!medName) { toast("薬の名前を入力してください"); $("med-other-name").focus(); return; }
+  }
   const iso = new Date($("med-time").value || Date.now()).toISOString();
-  if (hasRecentSame("服薬", selectedMed, iso) &&
-      !confirm("⚠️ 10分以内に「" + selectedMed + "」の記録がすでにあります。\n重複ではありませんか？\n\nOK＝このまま記録する ／ キャンセル＝やめる")) {
+  if (hasRecentSame("服薬", medName, iso) &&
+      !confirm("⚠️ 10分以内に「" + medName + "」の記録がすでにあります。\n重複ではありませんか？\n\nOK＝このまま記録する ／ キャンセル＝やめる")) {
     return;
   }
   lockBtn("submit-med");
+  if (selectedMed === OTHER_MED) rememberRecentMed(medName);
   submitPayload({
     type: "event",
     data: {
       kind: "服薬",
       occurredAt: iso,
-      med: selectedMed,
+      med: medName,
       memo: $("med-memo").value.trim(),
     },
   });
   renderHistory(); // 「今日の記録」にすぐ反映
   selectedMed = null;
   $("med-memo").value = "";
+  $("med-other-name").value = "";
+  $("med-other-name").classList.add("hidden");
   $("med-detail").classList.add("hidden");
   document.querySelectorAll("#med-buttons .med-btn").forEach((x) => x.classList.remove("selected"));
   $("med-time").value = nowLocalString();

@@ -95,6 +95,9 @@
     <div id="med-buttons" class="med-grid"><div class="loading-note">薬リストを読み込み中…</div></div>
 
     <div id="med-detail" class="detail hidden">
+      <!-- 「その他」を選んだときだけ出る薬名の自由入力欄（最近入力した名前が候補に出る） -->
+      <input type="text" id="med-other-name" class="memo-input hidden" placeholder="薬の名前を入力" list="med-other-list" autocomplete="off">
+      <datalist id="med-other-list"></datalist>
       <input type="text" id="med-memo" class="memo-input" placeholder="メモ（任意）">
       <button id="submit-med" class="btn-primary">服薬を記録する</button>
     </div>

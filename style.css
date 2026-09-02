@@ -148,6 +148,7 @@ h2 { font-size: 1rem; margin: 18px 0 8px; color: var(--accent-dark); }
   font-size: 1rem; font-weight: 700;
 }
 .med-btn.selected { border-color: var(--accent); background: #ecfdf5; color: var(--accent-dark); }
+.med-btn-other { grid-column: 1 / -1; border-style: dashed; color: var(--text-sub); font-weight: 600; }
 
 /* ---------- 詳細欄・入力 ---------- */
 .detail { margin-top: 10px; padding: 12px; background: #fff; border-radius: var(--radius); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
