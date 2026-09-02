@@ -113,8 +113,102 @@ function onOpen() {
     .addItem("処方アップデート(2026-07-31)を適用", "applyRxUpdate20260731")
     .addItem("アップデート(2026-08-02)を適用", "applyUpdate20260802")
     .addItem("アップデート(2026-08-10)を適用", "applyUpdate20260810")
+    .addItem("処方アップデート(2026-09-02)を適用", "applyRxUpdate20260902")
     .addItem("初期セットアップ（最初に1回）", "initialSetup")
     .addToUi();
+}
+
+/* =========================================================
+   処方アップデート(2026-09-02)の適用
+   9/2の消化器内科受診で出た新処方を「処方」シートに反映する。
+   - ポリフル: ジェネリック（ポリカルボフィルCa細粒0.6g）に変更、28日分
+   - マグミット: 朝昼夕 各1錠(330mg)で再開、28日分
+   - ヘモクロン: 継続、14日分
+   - ボラザG軟膏: 継続、全量48g
+   - グーフィス: 処方から外れたため「過去」へ
+   - ミヤBM: 変更なし（継続）
+   何度実行しても安全。ウェブアプリの再デプロイは不要（シートを書き換えるだけ）
+   ========================================================= */
+function applyRxUpdate20260902() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const rx = ss.getSheetByName(SHEET_RX);
+  if (!rx) {
+    SpreadsheetApp.getUi().alert("「処方」シートがありません。先に「処方アップデート(2026-07-31)を適用」を実行してください。");
+    return;
+  }
+  const values = rx.getDataRange().getValues();
+  const head = values[0];
+  const col = {};
+  RX_HEADERS.forEach(function (h) { col[h] = head.indexOf(h); });
+  const setCell = function (r, h, v) { if (col[h] >= 0) rx.getRange(r + 1, col[h] + 1).setValue(v); };
+  const letter = function (h) { return String.fromCharCode(65 + col[h]); };
+  const start = new Date(2026, 8, 2); // 2026-09-02
+  const done = [];
+
+  // 薬名ごとに書き換える内容
+  const updates = {
+    "ポリフル": {
+      "状態": "現行", "分類": "IBS治療薬（便の水分調整）",
+      "用法": "1日3回 朝昼夕食後 細粒0.6g（1日1.8g）", "タイミング": "朝食後,昼食後,夕食後",
+      "1回量": "0.6g", "開始日": start, "日数": 28,
+      "服用メモ": "9/2からジェネリック（ポリカルボフィルCa細粒）に変更。中身は同じ", "表示順": 1,
+    },
+    "マグミット（酸化マグネシウム）": {
+      "状態": "現行", "分類": "便秘治療薬（酸化マグネシウム）",
+      "用法": "1日3回 朝昼夕食後 各1錠(330mg)", "タイミング": "朝食後,昼食後,夕食後",
+      "1回量": "1錠", "開始日": start, "日数": 28, "数量": "",
+      "服用メモ": "2026-09-02の処方で再開", "表示順": 2,
+    },
+    "ヘモクロン": {
+      "状態": "現行", "開始日": start, "日数": 14,
+      "服用メモ": "他の薬より早く（14日で）終わる",
+    },
+    "ボラザG軟膏": {
+      "状態": "現行", "開始日": start, "数量": "48g（2.4g×20本）",
+    },
+    "グーフィス": {
+      "状態": "過去", "服用メモ": "2026-09-02の処方変更で終了（7/31〜）",
+    },
+  };
+
+  const found = {};
+  for (let r = 1; r < values.length; r++) {
+    const name = String(values[r][col["薬名"]] || "").trim();
+    if (!(name in updates)) continue;
+    found[name] = true;
+    const u = updates[name];
+    Object.keys(u).forEach(function (h) { setCell(r, h, u[h]); });
+    // 終了日の数式（開始日＋日数−1）と書式を整える
+    if (col["終了日"] >= 0 && col["開始日"] >= 0 && col["日数"] >= 0) {
+      const g = letter("開始日") + (r + 1), hh = letter("日数") + (r + 1);
+      rx.getRange(r + 1, col["終了日"] + 1).setFormula('=IF(AND(' + g + '<>"",' + hh + '<>""),' + g + '+' + hh + '-1,"")')
+        .setNumberFormat("yyyy-mm-dd");
+      rx.getRange(r + 1, col["開始日"] + 1).setNumberFormat("yyyy-mm-dd");
+      rx.getRange(r + 1, col["日数"] + 1).setNumberFormat("0");
+    }
+    done.push(name + " → " + (u["状態"] || "更新"));
+  }
+
+  // 行がなかった薬は追加する（マグミットの行名が違う場合など）
+  Object.keys(updates).forEach(function (name) {
+    if (found[name] || updates[name]["状態"] === "過去") return;
+    const u = updates[name];
+    const row = head.map(function (h) { return h === "薬名" ? name : (h in u ? u[h] : ""); });
+    rx.appendRow(row);
+    const r = rx.getLastRow();
+    if (col["終了日"] >= 0) {
+      const g = letter("開始日") + r, hh = letter("日数") + r;
+      rx.getRange(r, col["終了日"] + 1).setFormula('=IF(AND(' + g + '<>"",' + hh + '<>""),' + g + '+' + hh + '-1,"")').setNumberFormat("yyyy-mm-dd");
+      rx.getRange(r, col["開始日"] + 1).setNumberFormat("yyyy-mm-dd");
+      rx.getRange(r, col["日数"] + 1).setNumberFormat("0");
+    }
+    done.push(name + " → 行を追加（現行）");
+  });
+
+  SpreadsheetApp.getUi().alert(
+    "2026-09-02の処方を反映しました。\n\n・" + done.join("\n・") +
+    "\n\nアプリを開き直すと服薬チェックが新しい処方になります。\n「ダッシュボードを今すぐ更新」で処方経過シートも新処方基準になります。"
+  );
 }
 
 /* =========================================================
